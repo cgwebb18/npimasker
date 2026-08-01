@@ -13,9 +13,28 @@ from npimasker.pii_detect import find_pii_spans
 from npimasker.sensitive_fields import is_whole_cell_header
 
 
+def detect_csv_encoding(input_path: str) -> str:
+    """Best-effort detection of a CSV's text encoding.
+
+    Many CSVs handed to this tool are Excel-on-Windows exports saved as
+    Windows-1252 rather than UTF-8, which trips UnicodeDecodeError on bytes
+    like 0xb7. Fall back through cp1252 to latin-1, which never fails since
+    it maps every byte 0-255 to a codepoint.
+    """
+    with open(input_path, "rb") as f:
+        raw = f.read()
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            raw.decode(encoding)
+            return encoding
+        except UnicodeDecodeError:
+            continue
+    return "latin-1"
+
+
 def read_headers(input_path: str) -> list[str]:
     """Read just the header row of a CSV, for building a column checklist."""
-    with open(input_path, newline="", encoding="utf-8-sig") as f:
+    with open(input_path, newline="", encoding=detect_csv_encoding(input_path)) as f:
         reader = csv.reader(f)
         return next(reader, [])
 
@@ -50,7 +69,7 @@ def process_csv(
         raise ValueError(f"Unknown mode: {mode!r}")
     selected = set(selected_columns)
 
-    with open(input_path, newline="", encoding="utf-8-sig") as infile, open(
+    with open(input_path, newline="", encoding=detect_csv_encoding(input_path)) as infile, open(
         output_path, "w", newline="", encoding="utf-8"
     ) as outfile:
         reader = csv.reader(infile)
