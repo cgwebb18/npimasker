@@ -22,6 +22,7 @@ from npimasker.csv_processor import detect_csv_encoding, process_csv, read_heade
 from npimasker.sensitive_fields import (
     SENSITIVE_KEYWORDS,
     WHOLE_CELL_KEYWORDS,
+    _matches_any,
     detect_sensitive_columns,
     is_sensitive_header,
     is_whole_cell_header,
@@ -290,19 +291,23 @@ def test_scanning_path_headers_are_sensitive_but_not_whole_cell():
         assert not is_whole_cell_header(header), header
 
 
-def test_hyphenated_email_header_is_not_detected():
-    # BUG (documented, not fixed): _normalize() rewrites every non-alphanumeric
-    # character to a space, so a header "E-Mail" normalizes to "e mail" and can
-    # never match the "e-mail" keyword -- which still has its hyphen and is
-    # therefore dead. A column literally headed "E-Mail"/"E_Mail" is missed.
-    assert not is_sensitive_header("E-Mail")
-    assert not is_sensitive_header("E_Mail")
-    assert not is_sensitive_header("E Mail")
-    # The keyword doesn't even match itself, which is the tell.
-    assert not is_sensitive_header("e-mail")
-    assert [kw for kw in SENSITIVE_KEYWORDS if not is_sensitive_header(kw)] == ["e-mail"]
-    # It only gets picked up when some *other* keyword happens to be present.
-    assert is_sensitive_header("E-Mail Address")
+def test_punctuated_email_headers_are_detected():
+    # Regression: _normalize() rewrites every non-alphanumeric character to a
+    # space, so the punctuated keyword "e-mail" could never match any header --
+    # not even one spelled identically. That left "E-Mail" columns unticked by
+    # default, i.e. shipped in plaintext by a user trusting the pre-selection.
+    # Keywords are now normalized the same way headers are.
+    assert is_sensitive_header("E-Mail")
+    assert is_sensitive_header("E_Mail")
+    assert is_sensitive_header("E Mail")
+    assert is_sensitive_header("e-mail")
+
+
+def test_no_keyword_is_unmatchable():
+    # The tell for the bug above: a keyword that cannot match itself is dead
+    # weight and silently covers nothing. None may exist in either list.
+    for keywords in (SENSITIVE_KEYWORDS, WHOLE_CELL_KEYWORDS):
+        assert [kw for kw in keywords if not _matches_any(kw, keywords)] == []
 
 
 def test_surname_style_name_headers_are_not_detected():

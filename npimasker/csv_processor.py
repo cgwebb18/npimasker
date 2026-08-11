@@ -2,6 +2,7 @@
 
 import csv
 import logging
+import os
 import time
 
 from npimasker.crypto import (
@@ -82,9 +83,13 @@ def process_csv(
         raise ValueError(f"Unknown mode: {mode!r}")
     selected = set(selected_columns)
 
+    # Log basenames only: this log is written for partners to send back to
+    # us, and in healthcare a full path routinely embeds patient
+    # identifiers ("Smith_John_DOB1970.csv", \\share\patients\...). Cell
+    # values are never logged.
     logger.info(
-        "process_csv start: mode=%s, columns=%s, input=%r",
-        mode, sorted(selected), input_path,
+        "process_csv start: mode=%s, input=%s, output=%s",
+        mode, os.path.basename(input_path), os.path.basename(output_path),
     )
     start = time.monotonic()
     row_num = 1
@@ -103,6 +108,13 @@ def process_csv(
         whole_cell = {
             idx: is_whole_cell_header(headers[idx]) for idx in selected if idx < len(headers)
         }
+        # Header names, not indices: they're not PII, and "which columns
+        # did they actually pick" is the first thing we need when triaging.
+        logger.info(
+            "Selected columns: whole-cell=%s, scanned=%s",
+            [headers[i] for i in sorted(whole_cell) if whole_cell[i]],
+            [headers[i] for i in sorted(whole_cell) if not whole_cell[i]],
+        )
 
         for row_num, row in enumerate(reader, start=2):
             new_row = list(row)

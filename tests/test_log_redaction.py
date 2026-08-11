@@ -37,8 +37,6 @@ WRONG_KEY = derive_key("log-redaction-wrong-key")
 HEADERS = ["ID", "Full Name", "Phone Number", "Address"]
 COLUMNS = [1, 2, 3]
 
-XFAIL_REASON = "plan item (b): redact paths from logs"
-
 # Mirrors logging_setup.setup_logging()'s formatter, so what we assert on is
 # what actually lands in the file partners email us.
 _FORMATTER = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -71,7 +69,6 @@ def _log_blob(caplog):
     return "\n".join(parts)
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_input_directory_never_appears_in_log(tmp_path, caplog):
     secret_dir = tmp_path / "PATIENT_Jane_Doe_DOB1970"
     secret_dir.mkdir()
@@ -121,7 +118,6 @@ def test_output_directory_never_appears_in_log(tmp_path, caplog):
     assert str(output_path) not in blob
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_output_basename_is_logged(tmp_path, caplog):
     input_path = tmp_path / "in.csv"
     output_path = tmp_path / "DISTINCTIVE_OUTPUT_NAME.csv"
@@ -133,7 +129,6 @@ def test_output_basename_is_logged(tmp_path, caplog):
     assert "DISTINCTIVE_OUTPUT_NAME.csv" in _log_blob(caplog)
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_selected_columns_logged_as_header_names_not_indices(tmp_path, caplog):
     input_path = tmp_path / "in.csv"
     output_path = tmp_path / "out.csv"
@@ -181,7 +176,6 @@ def test_cell_values_never_logged_on_decrypt(tmp_path, caplog):
         assert sentinel in list(csv.reader(f))[1][1]
 
 
-@pytest.mark.xfail(strict=True, reason=XFAIL_REASON)
 def test_error_path_logs_column_name_but_not_path_or_values(tmp_path, caplog):
     sentinel = "ZZSENTINELVALUEZZ"
     secret_dir = tmp_path / "PATIENT_Jane_Doe_DOB1970"
