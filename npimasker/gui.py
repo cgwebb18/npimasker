@@ -2,8 +2,10 @@
 
 import logging
 import os
+import queue
 import subprocess
 import sys
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -28,6 +30,7 @@ class App(tk.Tk):
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.headers: list[str] = []
+        self._progress_queue = None
 
         self._build_widgets()
 
@@ -207,6 +210,7 @@ class App(tk.Tk):
         output_path = self.output_path.get()
         passphrase = self.key_entry.get()
         selected = list(self.columns_list.curselection())
+        mode = self.mode.get()
 
         if not input_path:
             messagebox.showwarning("NPIMasker", "Choose an input CSV file first.")
@@ -224,23 +228,69 @@ class App(tk.Tk):
                 return
 
         key = derive_key(passphrase)
+        self._progress_queue = queue.Queue()
+        self.run_button.config(state="disabled")
+        self.status_var.set("Running...")
+
+        thread = threading.Thread(
+            target=self._process_worker,
+            args=(input_path, output_path, key, mode, selected),
+            daemon=True,
+        )
+        thread.start()
+        self.after(100, self._poll_progress, output_path, mode)
+
+    def _process_worker(self, input_path, output_path, key, mode, selected):
+        """Runs on a background thread so the Tk event loop keeps pumping
+        messages during long CSV runs, instead of Windows showing the app
+        as unresponsive for the whole run."""
         try:
-            process_csv(input_path, output_path, key, self.mode.get(), selected)
-        except WrongKeyError as exc:
-            messagebox.showerror("NPIMasker", str(exc))
-            self.status_var.set("Failed: wrong key or corrupted file.")
-            return
+            process_csv(
+                input_path,
+                output_path,
+                key,
+                mode,
+                selected,
+                progress_callback=lambda row: self._progress_queue.put(("progress", row)),
+            )
         except Exception as exc:  # surface everything: a windowed app has no stderr
             logger.exception("process_csv failed")
+            self._progress_queue.put(("error", exc))
+        else:
+            self._progress_queue.put(("done", None))
+
+    def _poll_progress(self, output_path, mode):
+        try:
+            while True:
+                kind, payload = self._progress_queue.get_nowait()
+                if kind == "progress":
+                    self.status_var.set(f"Processing... row {payload}")
+                elif kind == "error":
+                    self._finish_run()
+                    self._show_run_error(payload)
+                    return
+                elif kind == "done":
+                    self._finish_run()
+                    messagebox.showinfo("NPIMasker", f"Done. Output written to:\n{output_path}")
+                    self.status_var.set(f"Last run: {mode} -> {output_path}")
+                    return
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_progress, output_path, mode)
+
+    def _finish_run(self):
+        self.run_button.config(state="normal")
+
+    def _show_run_error(self, exc):
+        if isinstance(exc, WrongKeyError):
+            messagebox.showerror("NPIMasker", str(exc))
+            self.status_var.set("Failed: wrong key or corrupted file.")
+        else:
             messagebox.showerror(
                 "NPIMasker",
                 f"Failed: {type(exc).__name__}: {exc}\n\nDetails were written to:\n{self.log_path}",
             )
             self.status_var.set("Failed.")
-            return
-
-        messagebox.showinfo("NPIMasker", f"Done. Output written to:\n{output_path}")
-        self.status_var.set(f"Last run: {self.mode.get()} -> {output_path}")
 
 
 def main():
