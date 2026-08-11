@@ -3,7 +3,11 @@ spaCy NER for person names anywhere in a string (e.g. "...his name is
 Kang Li").
 """
 
+import logging
 import re
+import time
+
+logger = logging.getLogger(__name__)
 
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}\b")
 SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
@@ -21,7 +25,10 @@ def _get_nlp():
     if _nlp is None:
         import spacy
 
+        logger.info("Loading spaCy model en_core_web_sm...")
+        start = time.monotonic()
         _nlp = spacy.load("en_core_web_sm")
+        logger.info("spaCy model loaded in %.2fs", time.monotonic() - start)
     return _nlp
 
 

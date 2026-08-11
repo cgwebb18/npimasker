@@ -1,6 +1,8 @@
 """CSV reading/writing and encrypt/decrypt orchestration for NPIMasker."""
 
 import csv
+import logging
+import time
 
 from npimasker.crypto import (
     WrongKeyError,
@@ -11,6 +13,10 @@ from npimasker.crypto import (
 )
 from npimasker.pii_detect import find_pii_spans
 from npimasker.sensitive_fields import is_whole_cell_header
+
+logger = logging.getLogger(__name__)
+
+_PROGRESS_INTERVAL = 500
 
 
 def detect_csv_encoding(input_path: str) -> str:
@@ -26,9 +32,11 @@ def detect_csv_encoding(input_path: str) -> str:
     for encoding in ("utf-8-sig", "cp1252"):
         try:
             raw.decode(encoding)
+            logger.info("Detected input encoding: %s", encoding)
             return encoding
         except UnicodeDecodeError:
             continue
+    logger.info("Detected input encoding: latin-1 (fallback)")
     return "latin-1"
 
 
@@ -53,6 +61,7 @@ def process_csv(
     key: bytes,
     mode: str,
     selected_columns: list[int],
+    progress_callback=None,
 ) -> None:
     """Encrypt or decrypt the selected columns of a CSV, row by row.
 
@@ -64,10 +73,21 @@ def process_csv(
 
     Columns not in `selected_columns` are copied through unchanged.
     Raises WrongKeyError (with row/column context) if a decrypt fails.
+
+    If given, `progress_callback(row_num)` is called every
+    `_PROGRESS_INTERVAL` rows so a caller (e.g. a GUI polling from a
+    background thread) can show liveness during long runs.
     """
     if mode not in ("encrypt", "decrypt"):
         raise ValueError(f"Unknown mode: {mode!r}")
     selected = set(selected_columns)
+
+    logger.info(
+        "process_csv start: mode=%s, columns=%s, input=%r",
+        mode, sorted(selected), input_path,
+    )
+    start = time.monotonic()
+    row_num = 1
 
     with open(input_path, newline="", encoding=detect_csv_encoding(input_path)) as infile, open(
         output_path, "w", newline="", encoding="utf-8"
@@ -99,3 +119,13 @@ def process_csv(
                         f"{exc} (row {row_num}, column '{column_name}')"
                     ) from exc
             writer.writerow(new_row)
+
+            if row_num % _PROGRESS_INTERVAL == 0:
+                elapsed = time.monotonic() - start
+                logger.info("process_csv progress: row=%d, elapsed=%.1fs", row_num, elapsed)
+                if progress_callback is not None:
+                    progress_callback(row_num)
+
+    logger.info(
+        "process_csv done: rows=%d, elapsed=%.1fs", row_num - 1, time.monotonic() - start
+    )
