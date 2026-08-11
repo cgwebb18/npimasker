@@ -252,7 +252,7 @@ def test_ui_keeps_pumping_events_while_the_worker_runs(tmp_path, monkeypatch):
         assert ticks["n"] > 10, f"only {ticks['n']} after() callbacks during the run"
         # Progress was reported mid-run, i.e. the loop was live *while* the
         # worker was still going, not just after it finished.
-        assert any(s.startswith("Processing... row ") for s in statuses), statuses
+        assert any(s.startswith("Processing... ") and s.endswith(" rows") for s in statuses), statuses
         assert _state(app) == "normal"
         assert [d[0] for d in dialogs] == ["info"]
     finally:
@@ -485,7 +485,7 @@ def test_progress_queue_messages_drive_the_status_line(tmp_path, monkeypatch):
         app.run_button.config(state="disabled")
 
         app._poll_progress(str(output_path), "encrypt")
-        assert app.status_var.get() == "Processing... row 500"
+        assert app.status_var.get() == "Processing... 500 rows"
         assert _state(app) == "disabled"
         assert dialogs == []
 

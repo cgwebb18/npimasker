@@ -277,7 +277,7 @@ class App(tk.Tk):
             while True:
                 kind, payload = self._progress_queue.get_nowait()
                 if kind == "progress":
-                    self.status_var.set(f"Processing... row {payload}")
+                    self.status_var.set(f"Processing... {payload:,} rows")
                 elif kind == "error":
                     self._finish_run()
                     self._show_run_error(payload)

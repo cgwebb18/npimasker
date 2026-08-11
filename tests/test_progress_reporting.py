@@ -95,10 +95,6 @@ def test_progress_reports_data_row_counts_at_the_default_interval(tmp_path):
     assert calls == [500, 1000]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (c): progress reports CSV line numbers, not data-row counts",
-)
 def test_progress_never_reports_more_rows_than_the_file_contains(tmp_path):
     # 499 data rows occupy lines 2..500, so the line-number-based
     # implementation reports 500 -- one more row than exists.
@@ -119,10 +115,6 @@ def test_progress_never_reports_more_rows_than_the_file_contains(tmp_path):
     assert all(reported <= data_rows for reported in calls), calls
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (c): time-based progress; progress_interval_seconds not accepted yet",
-)
 def test_zero_second_interval_reports_every_row_on_a_small_file(tmp_path):
     # The regression this whole contract exists for: a small file whose
     # rows are individually slow currently emits no progress at all.
@@ -142,10 +134,6 @@ def test_zero_second_interval_reports_every_row_on_a_small_file(tmp_path):
     assert calls == list(range(1, 101))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (c): progress_interval_rows/progress_interval_seconds not accepted yet",
-)
 def test_row_interval_still_triggers_when_the_time_trigger_cannot_fire(tmp_path):
     input_path = _write_csv(tmp_path / "in.csv", 250)
     calls = []
@@ -164,10 +152,6 @@ def test_row_interval_still_triggers_when_the_time_trigger_cannot_fire(tmp_path)
     assert calls == [100, 200]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (c): time trigger independent of the row trigger not implemented",
-)
 def test_time_trigger_fires_independently_of_the_row_trigger(tmp_path):
     input_path = _write_csv(tmp_path / "in.csv", 50)
     calls = []

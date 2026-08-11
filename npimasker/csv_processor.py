@@ -17,7 +17,8 @@ from npimasker.sensitive_fields import is_whole_cell_header
 
 logger = logging.getLogger(__name__)
 
-_PROGRESS_INTERVAL = 500
+_PROGRESS_INTERVAL_ROWS = 500
+_PROGRESS_INTERVAL_SECONDS = 2.0
 
 
 def detect_csv_encoding(input_path: str) -> str:
@@ -63,6 +64,8 @@ def process_csv(
     mode: str,
     selected_columns: list[int],
     progress_callback=None,
+    progress_interval_rows: int = _PROGRESS_INTERVAL_ROWS,
+    progress_interval_seconds: float = _PROGRESS_INTERVAL_SECONDS,
 ) -> None:
     """Encrypt or decrypt the selected columns of a CSV, row by row.
 
@@ -75,9 +78,17 @@ def process_csv(
     Columns not in `selected_columns` are copied through unchanged.
     Raises WrongKeyError (with row/column context) if a decrypt fails.
 
-    If given, `progress_callback(row_num)` is called every
-    `_PROGRESS_INTERVAL` rows so a caller (e.g. a GUI polling from a
-    background thread) can show liveness during long runs.
+    If given, `progress_callback(rows_done)` reports the number of data
+    rows processed so far - the same unit as the `rows=N` completion log
+    line - so a caller (e.g. a GUI polling from a background thread) can
+    show liveness during long runs.
+
+    Progress fires whenever EITHER `progress_interval_rows` rows or
+    `progress_interval_seconds` have passed since the last report. The
+    time trigger matters because the expensive work is per-cell, not
+    per-row: a 100-row file of long free-text cells can take minutes
+    inside NER, and a purely row-counted trigger would report nothing at
+    all for the entire run.
     """
     if mode not in ("encrypt", "decrypt"):
         raise ValueError(f"Unknown mode: {mode!r}")
@@ -93,6 +104,8 @@ def process_csv(
     )
     start = time.monotonic()
     row_num = 1
+    last_reported_rows = 0
+    last_reported_at = start
 
     with open(input_path, newline="", encoding=detect_csv_encoding(input_path)) as infile, open(
         output_path, "w", newline="", encoding="utf-8"
@@ -132,11 +145,18 @@ def process_csv(
                     ) from exc
             writer.writerow(new_row)
 
-            if row_num % _PROGRESS_INTERVAL == 0:
-                elapsed = time.monotonic() - start
-                logger.info("process_csv progress: row=%d, elapsed=%.1fs", row_num, elapsed)
+            rows_done = row_num - 1
+            now = time.monotonic()
+            if (
+                rows_done - last_reported_rows >= progress_interval_rows
+                or now - last_reported_at >= progress_interval_seconds
+            ):
+                last_reported_rows, last_reported_at = rows_done, now
+                logger.info(
+                    "process_csv progress: rows=%d, elapsed=%.1fs", rows_done, now - start
+                )
                 if progress_callback is not None:
-                    progress_callback(row_num)
+                    progress_callback(rows_done)
 
     logger.info(
         "process_csv done: rows=%d, elapsed=%.1fs", row_num - 1, time.monotonic() - start
