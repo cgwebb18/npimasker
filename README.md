@@ -35,6 +35,15 @@ columns get this treatment vs. whole-cell encryption.
 If you decrypt with the wrong key, or a value got corrupted, NPIMasker shows
 a clear error instead of silently producing garbage.
 
+## Troubleshooting
+
+Every run writes a log file with timing/progress info and full tracebacks
+for any error or crash. If something goes wrong, click **Open Log Folder**
+(next to Run) and send us `npimasker.log` from that folder.
+
+The log lives at `%LOCALAPPDATA%\NPIMasker\logs\npimasker.log` on Windows
+(falls back to your home folder if `LOCALAPPDATA` isn't set).
+
 ## Building the app
 
 - **Windows (.exe):**
