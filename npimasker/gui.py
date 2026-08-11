@@ -41,9 +41,15 @@ class App(tk.Tk):
         them like any other failure."""
         logger.critical("Unhandled error in UI callback", exc_info=(exc, val, tb))
         messagebox.showerror(
-            "NPIMasker",
-            f"Unexpected error: {exc.__name__}: {val}\n\nDetails were written to:\n{self.log_path}",
+            "NPIMasker", f"Unexpected error: {exc.__name__}: {val}{self._log_hint()}"
         )
+
+    def _log_hint(self) -> str:
+        """Trailing '...see the log' line for error dialogs, omitted when
+        no log file could be opened (see logging_setup.setup_logging)."""
+        if self.log_path is None:
+            return ""
+        return f"\n\nDetails were written to:\n{self.log_path}"
 
     # -- UI construction -------------------------------------------------
 
@@ -194,6 +200,13 @@ class App(tk.Tk):
         self.key_entry.insert(0, passphrase)
 
     def _open_log_folder(self):
+        if self.log_path is None:
+            messagebox.showinfo(
+                "NPIMasker",
+                "No log file is available - NPIMasker could not write to any "
+                "log location on this machine.",
+            )
+            return
         log_dir = self.log_path.parent
         try:
             if sys.platform == "win32":
@@ -287,8 +300,7 @@ class App(tk.Tk):
             self.status_var.set("Failed: wrong key or corrupted file.")
         else:
             messagebox.showerror(
-                "NPIMasker",
-                f"Failed: {type(exc).__name__}: {exc}\n\nDetails were written to:\n{self.log_path}",
+                "NPIMasker", f"Failed: {type(exc).__name__}: {exc}{self._log_hint()}"
             )
             self.status_var.set("Failed.")
 

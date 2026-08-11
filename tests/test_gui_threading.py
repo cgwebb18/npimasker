@@ -500,7 +500,6 @@ def test_progress_queue_messages_drive_the_status_line(tmp_path, monkeypatch):
 # -- Not implemented yet -------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="plan item: App must tolerate log_path=None")
 def test_app_tolerates_a_missing_log_path(tmp_path, monkeypatch):
     dialogs = []
 

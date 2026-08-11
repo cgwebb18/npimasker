@@ -5,10 +5,6 @@ build, so it is the one function that must never be the reason the app
 fails to start: an unwritable log directory has to degrade to a temp dir,
 and a completely unwritable machine has to degrade to "no file logging"
 rather than a crash the user can't even see.
-
-Tests marked xfail(strict=True) describe behavior that is not implemented
-yet; when the implementation lands they XPASS (= fail), which is the
-signal to delete the marker.
 """
 
 import logging
@@ -137,10 +133,6 @@ def test_setup_logging_writes_startup_banner(tmp_path, monkeypatch):
     assert "Frozen (PyInstaller): " in text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (a): setup_logging must not raise, and must fall back to the temp dir, when the primary log dir is unwritable",
-)
 def test_setup_logging_falls_back_to_temp_dir(tmp_path, monkeypatch):
     _skip_if_permissions_not_enforced()
     primary = tmp_path / "appdata"
@@ -165,10 +157,6 @@ def test_setup_logging_falls_back_to_temp_dir(tmp_path, monkeypatch):
         primary.chmod(0o700)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (a): setup_logging must return None (and still install hooks) when no log dir is writable, instead of raising",
-)
 def test_setup_logging_returns_none_when_no_dir_is_writable(tmp_path, monkeypatch):
     def _deny(*args, **kwargs):
         raise PermissionError("denied")
@@ -277,10 +265,6 @@ def test_available_memory_mb_reads_win32_value(monkeypatch):
     assert logging_setup._available_memory_mb() == 2048
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (a): _available_memory_mb only catches OSError, so a missing ctypes symbol (AttributeError) escapes and takes setup_logging() down",
-)
 def test_available_memory_mb_swallows_non_oserror(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     # No .windll attribute: exactly what a stripped/mismatched ctypes looks like.
@@ -289,10 +273,6 @@ def test_available_memory_mb_swallows_non_oserror(monkeypatch):
     assert logging_setup._available_memory_mb() is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (a): a failed GlobalMemoryStatusEx call (returns 0) must yield None, not a bogus '0 MB' log line",
-)
 def test_available_memory_mb_none_when_win32_call_fails(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setitem(
@@ -304,10 +284,6 @@ def test_available_memory_mb_none_when_win32_call_fails(monkeypatch):
     assert logging_setup._available_memory_mb() is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="plan item (a): the AttributeError from the memory probe escapes setup_logging(), so startup dies instead of just skipping the memory line",
-)
 def test_setup_logging_survives_broken_memory_probe(tmp_path, monkeypatch):
     """A crashing memory probe must not cost the app its log file."""
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))

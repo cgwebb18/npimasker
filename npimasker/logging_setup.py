@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import sys
+import tempfile
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -19,6 +20,10 @@ from pathlib import Path
 from npimasker import __version__
 
 _LOG_FILENAME = "npimasker.log"
+
+# The log file actually in use, which may be a fallback location rather
+# than the preferred one, or None if file logging couldn't be set up.
+_active_path: Path | None = None
 
 
 def _log_dir() -> Path:
@@ -29,6 +34,15 @@ def _log_dir() -> Path:
 
 def log_path() -> Path:
     return _log_dir() / _LOG_FILENAME
+
+
+def _candidate_dirs():
+    """Log locations to try, best first. The preferred spot can be
+    unusable on a locked-down corporate Windows machine (LOCALAPPDATA
+    redirected to an offline network share, restrictive ACLs), and
+    failing to log must never stop the app from starting."""
+    yield _log_dir()
+    yield Path(tempfile.gettempdir()) / "NPIMasker" / "logs"
 
 
 def _available_memory_mb():
@@ -52,9 +66,13 @@ def _available_memory_mb():
 
         status = MEMORYSTATUSEX()
         status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
         return status.ullAvailPhys // (1024 * 1024)
-    except OSError:
+    except Exception:
+        # Diagnostics are strictly best-effort: a missing ctypes symbol
+        # raises AttributeError, not OSError, and must not take startup
+        # down with it.
         return None
 
 
@@ -73,19 +91,45 @@ def _thread_excepthook(args):
     )
 
 
-def setup_logging() -> Path:
+def _attach_handler() -> Path | None:
+    """Attach a rotating file handler at the first usable location.
+    Returns the active log file path, or None if nowhere was writable."""
+    for directory in _candidate_dirs():
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / _LOG_FILENAME
+            handler = RotatingFileHandler(
+                path, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+            )
+        except Exception:
+            continue
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        # Attach explicitly rather than via basicConfig, which silently
+        # does nothing whenever the root logger already has a handler.
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        root.addHandler(handler)
+        return path
+    return None
+
+
+def setup_logging() -> Path | None:
     """Configure a rotating log file and install crash-capturing hooks.
 
     Must be called once, before the GUI is built, so startup failures
     (e.g. a bad PyInstaller bundle) are captured too. Returns the log
-    file path so the GUI can show/open it.
-    """
-    path = log_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    file path, or None if no location was writable.
 
-    handler = RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    logging.basicConfig(level=logging.INFO, handlers=[handler])
+    Never raises: losing diagnostics is survivable, failing to launch is
+    not, and in a --windowed build a startup exception is invisible.
+    """
+    global _active_path
+    if any(isinstance(h, RotatingFileHandler) for h in logging.getLogger().handlers):
+        return _active_path  # already configured; don't duplicate handlers
+
+    path = _active_path = _attach_handler()
 
     logger = logging.getLogger(__name__)
     logger.info("NPIMasker v%s starting", __version__)
