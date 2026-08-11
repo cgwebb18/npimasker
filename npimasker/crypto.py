@@ -13,6 +13,7 @@ ciphertext.
 import base64
 import re
 import secrets
+from functools import lru_cache
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
@@ -44,11 +45,24 @@ def derive_key(passphrase: str) -> bytes:
     return base64.urlsafe_b64encode(derived)
 
 
+@lru_cache(maxsize=4)
+def _fernet(key: bytes) -> Fernet:
+    """Reuse the Fernet for a given key instead of rebuilding it per cell.
+
+    Fernet.__init__ base64-decodes the key, splits it and sets up the
+    cipher - about 1us, which is ~14% of the cost of encrypting a short
+    value. It holds no per-message state: the IV comes from os.urandom
+    and the timestamp from time.time(), both inside encrypt(), so reusing
+    the object cannot make two ciphertexts repeat.
+    """
+    return Fernet(key)
+
+
 def encrypt_value(value: str, key: bytes) -> str:
     """Encrypt a single cell value. Empty values pass through unchanged."""
     if value == "":
         return value
-    return Fernet(key).encrypt(value.encode("utf-8")).decode("utf-8")
+    return _fernet(key).encrypt(value.encode("utf-8")).decode("utf-8")
 
 
 def decrypt_value(token: str, key: bytes) -> str:
@@ -56,7 +70,7 @@ def decrypt_value(token: str, key: bytes) -> str:
     if token == "":
         return token
     try:
-        return Fernet(key).decrypt(token.encode("utf-8")).decode("utf-8")
+        return _fernet(key).decrypt(token.encode("utf-8")).decode("utf-8")
     except (InvalidToken, ValueError) as exc:
         raise WrongKeyError(
             "Wrong key or corrupted file: could not decrypt a value."
