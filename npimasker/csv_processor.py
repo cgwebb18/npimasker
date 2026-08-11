@@ -1,6 +1,7 @@
 """CSV reading/writing and encrypt/decrypt orchestration for NPIMasker."""
 
 import atexit
+import codecs
 import contextlib
 import csv
 import logging
@@ -25,6 +26,29 @@ _PROGRESS_INTERVAL_ROWS = 500
 _PROGRESS_INTERVAL_SECONDS = 2.0
 
 
+_SNIFF_CHUNK_BYTES = 1 << 20
+
+
+def _decodes_cleanly(input_path: str, encoding: str) -> bool:
+    """Whether the whole file decodes as `encoding`, read in chunks.
+
+    An incremental decoder buffers a multi-byte sequence split across a
+    chunk boundary, so this gives the same answer as decoding the entire
+    file at once without ever holding it in memory. The closing
+    decode(b"", final=True) is what makes a sequence truncated at EOF
+    still raise, matching bytes.decode().
+    """
+    decoder = codecs.getincrementaldecoder(encoding)()
+    try:
+        with open(input_path, "rb") as f:
+            while chunk := f.read(_SNIFF_CHUNK_BYTES):
+                decoder.decode(chunk, False)
+            decoder.decode(b"", True)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def detect_csv_encoding(input_path: str) -> str:
     """Best-effort detection of a CSV's text encoding.
 
@@ -32,16 +56,26 @@ def detect_csv_encoding(input_path: str) -> str:
     Windows-1252 rather than UTF-8, which trips UnicodeDecodeError on bytes
     like 0xb7. Fall back through cp1252 to latin-1, which never fails since
     it maps every byte 0-255 to a codepoint.
+
+    Reads in chunks rather than slurping the file: the whole-file version
+    cost ~2-3x the file size in peak memory (the bytes, plus a str that is
+    thrown away immediately), on top of everything else this tool holds.
     """
-    with open(input_path, "rb") as f:
-        raw = f.read()
     for encoding in ("utf-8-sig", "cp1252"):
-        try:
-            raw.decode(encoding)
-            logger.info("Detected input encoding: %s", encoding)
-            return encoding
-        except UnicodeDecodeError:
+        # Under 3 bytes the file could be nothing but a truncated BOM,
+        # where an incremental utf-8-sig decoder accepts what a one-shot
+        # decode rejects. Tiny by definition, so just decode it outright.
+        if os.path.getsize(input_path) < 3:
+            with open(input_path, "rb") as f:
+                raw = f.read()
+            try:
+                raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        elif not _decodes_cleanly(input_path, encoding):
             continue
+        logger.info("Detected input encoding: %s", encoding)
+        return encoding
     logger.info("Detected input encoding: latin-1 (fallback)")
     return "latin-1"
 
