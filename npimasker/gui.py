@@ -31,8 +31,10 @@ class App(tk.Tk):
         self.output_path = tk.StringVar()
         self.headers: list[str] = []
         self._progress_queue = None
+        self._run_active = False
 
         self._build_widgets()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def report_callback_exception(self, exc, val, tb):
         """Tkinter routes exceptions raised inside widget callbacks here
@@ -242,6 +244,7 @@ class App(tk.Tk):
 
         key = derive_key(passphrase)
         self._progress_queue = queue.Queue()
+        self._run_active = True
         self.run_button.config(state="disabled")
         self.status_var.set("Running...")
 
@@ -292,7 +295,21 @@ class App(tk.Tk):
         self.after(100, self._poll_progress, output_path, mode)
 
     def _finish_run(self):
+        self._run_active = False
         self.run_button.config(state="normal")
+
+    def _on_close(self):
+        """Confirm before quitting mid-run. The worker is a daemon thread,
+        so closing the window kills it wherever it happens to be and the
+        part-written output is discarded - fine, but the user should know
+        the job won't finish rather than assume it did."""
+        if self._run_active and not messagebox.askyesno(
+            "NPIMasker",
+            "A run is still in progress. Quitting now will cancel it and "
+            "no output file will be written.\n\nQuit anyway?",
+        ):
+            return
+        self.destroy()
 
     def _show_run_error(self, exc):
         if isinstance(exc, WrongKeyError):

@@ -1,8 +1,12 @@
 """CSV reading/writing and encrypt/decrypt orchestration for NPIMasker."""
 
+import atexit
+import contextlib
 import csv
 import logging
 import os
+import tempfile
+import threading
 import time
 
 from npimasker.crypto import (
@@ -40,6 +44,67 @@ def detect_csv_encoding(input_path: str) -> str:
             continue
     logger.info("Detected input encoding: latin-1 (fallback)")
     return "latin-1"
+
+
+_inflight_temps: set[str] = set()
+_inflight_lock = threading.Lock()
+
+
+@atexit.register
+def _remove_inflight_temps():
+    """Delete temp files still in flight at interpreter exit.
+
+    The GUI runs process_csv on a daemon thread, so quitting mid-run kills
+    the worker outright and _atomic_output's finally never executes. Left
+    alone, every abandoned run would drop a hidden part-written CSV in the
+    user's output folder. This runs on the main thread during shutdown,
+    after daemon threads have stopped.
+    """
+    with _inflight_lock:
+        paths = list(_inflight_temps)
+    for path in paths:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def _atomic_output(output_path: str):
+    """Yield a writable handle whose contents only appear at output_path
+    if the caller finishes without raising.
+
+    Writing straight to output_path leaves a truncated file behind when a
+    run dies partway: the GUI runs this on a daemon thread, so closing the
+    window mid-run silently produces a short file that looks like a
+    finished encryption. Keeping the original intact matters even more -
+    open(path, "w") empties an existing output the moment it's called, so
+    a failed re-run would destroy the previous good result.
+
+    The temp file is created in the destination directory so the rename is
+    a same-filesystem, atomic operation. It inherits mkstemp's 0600 mode
+    rather than the umask default; on POSIX that means the output is
+    owner-only, which is the safer default for a file full of PII (and is
+    moot on Windows, the deployment target).
+    """
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    fd, temp_path = tempfile.mkstemp(dir=out_dir, prefix=".npimasker-", suffix=".tmp")
+    created = temp_path
+    with _inflight_lock:
+        _inflight_temps.add(created)
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
+            yield handle
+        os.replace(temp_path, output_path)
+        temp_path = None  # ownership handed to output_path
+    finally:
+        with _inflight_lock:
+            _inflight_temps.discard(created)
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 def read_headers(input_path: str) -> list[str]:
@@ -107,9 +172,9 @@ def process_csv(
     last_reported_rows = 0
     last_reported_at = start
 
-    with open(input_path, newline="", encoding=detect_csv_encoding(input_path)) as infile, open(
-        output_path, "w", newline="", encoding="utf-8"
-    ) as outfile:
+    with _atomic_output(output_path) as outfile, open(
+        input_path, newline="", encoding=detect_csv_encoding(input_path)
+    ) as infile:
         reader = csv.reader(infile)
         writer = csv.writer(outfile)
 

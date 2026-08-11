@@ -146,7 +146,6 @@ def test_awkward_output_paths_round_trip(tmp_path):
 # --- plan item (d): atomic output write ------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="plan item (d): atomic output write")
 def test_failure_leaves_no_output_file(tmp_path):
     encrypted_path = _make_encrypted_csv(tmp_path)
     output_path = tmp_path / "out.csv"
@@ -157,7 +156,6 @@ def test_failure_leaves_no_output_file(tmp_path):
     assert not output_path.exists()
 
 
-@pytest.mark.xfail(strict=True, reason="plan item (d): atomic output write")
 def test_failure_preserves_existing_output_file(tmp_path):
     encrypted_path = _make_encrypted_csv(tmp_path)
     output_path = tmp_path / "out.csv"
@@ -170,7 +168,6 @@ def test_failure_preserves_existing_output_file(tmp_path):
     assert output_path.read_bytes() == SENTINEL
 
 
-@pytest.mark.xfail(strict=True, reason="plan item (d): atomic output write")
 def test_failure_leaves_no_temp_artifacts(tmp_path):
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -189,7 +186,6 @@ def test_failure_leaves_no_temp_artifacts(tmp_path):
     assert sorted(os.listdir(work_dir)) == before
 
 
-@pytest.mark.xfail(strict=True, reason="plan item (d): atomic output write")
 def test_late_failure_in_large_file_leaves_no_output(tmp_path):
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -214,7 +210,6 @@ def test_late_failure_in_large_file_leaves_no_output(tmp_path):
     assert sorted(os.listdir(work_dir)) == before
 
 
-@pytest.mark.xfail(strict=True, reason="plan item (d): atomic output write")
 def test_keyboard_interrupt_mid_run_leaves_no_output(tmp_path, monkeypatch):
     # Models the GUI window being closed mid-run: the daemon thread dies via
     # a BaseException, which a bare `except Exception:` would not catch, so
@@ -231,7 +226,6 @@ def test_keyboard_interrupt_mid_run_leaves_no_output(tmp_path, monkeypatch):
     assert sorted(os.listdir(tmp_path)) == ["in.csv"]
 
 
-@pytest.mark.xfail(strict=True, reason="plan item (d): atomic output write")
 def test_keyboard_interrupt_mid_run_preserves_existing_output(tmp_path, monkeypatch):
     input_path = tmp_path / "in.csv"
     output_path = tmp_path / "out.csv"
@@ -246,7 +240,6 @@ def test_keyboard_interrupt_mid_run_preserves_existing_output(tmp_path, monkeypa
     assert sorted(os.listdir(tmp_path)) == ["in.csv", "out.csv"]
 
 
-@pytest.mark.xfail(strict=True, reason="plan item (d): atomic output write")
 def test_temp_file_lives_in_the_output_directory(tmp_path, monkeypatch):
     # The temp file must share a filesystem with output_path, or os.replace
     # fails cross-device. Same directory is the guarantee we can check.
@@ -272,3 +265,52 @@ def test_temp_file_lives_in_the_output_directory(tmp_path, monkeypatch):
     assert os.path.dirname(os.path.abspath(src)) == str(output_dir)
     assert os.path.abspath(dst) == str(output_path)
     assert _read_csv(output_path)[1][1] != "Jane Doe"
+
+
+def test_inflight_temp_is_tracked_during_the_run_and_released_after(tmp_path):
+    """The GUI's worker is a daemon thread, so quitting mid-run kills it
+    without unwinding _atomic_output's finally. An atexit hook cleans up
+    whatever was still in flight, which only works if the set is accurate."""
+    input_path = tmp_path / "in.csv"
+    output_path = tmp_path / "out.csv"
+    _write_csv(input_path, HEADERS, ROWS)
+
+    seen = []
+    original = csv_processor.encrypt_value
+
+    def _spy(value, key):
+        seen.append(set(csv_processor._inflight_temps))
+        return original(value, key)
+
+    csv_processor.encrypt_value = _spy
+    try:
+        process_csv(str(input_path), str(output_path), KEY, "encrypt", [1])
+    finally:
+        csv_processor.encrypt_value = original
+
+    # Exactly one temp file was registered while the run was in progress...
+    assert seen and all(len(s) == 1 for s in seen)
+    # ...and it lived in the output directory, not the system temp dir.
+    (temp_path,) = seen[0]
+    assert os.path.dirname(temp_path) == str(tmp_path)
+    # ...and nothing is left registered once the run completes.
+    assert csv_processor._inflight_temps == set()
+
+
+def test_atexit_hook_removes_an_abandoned_temp_file(tmp_path):
+    abandoned = tmp_path / ".npimasker-abandoned.tmp"
+    abandoned.write_text("half a csv", encoding="utf-8")
+    csv_processor._inflight_temps.add(str(abandoned))
+    try:
+        csv_processor._remove_inflight_temps()
+        assert not abandoned.exists()
+    finally:
+        csv_processor._inflight_temps.discard(str(abandoned))
+
+
+def test_atexit_hook_tolerates_an_already_deleted_temp_file(tmp_path):
+    csv_processor._inflight_temps.add(str(tmp_path / "gone.tmp"))
+    try:
+        csv_processor._remove_inflight_temps()  # must not raise
+    finally:
+        csv_processor._inflight_temps.discard(str(tmp_path / "gone.tmp"))

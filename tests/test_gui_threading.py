@@ -497,7 +497,7 @@ def test_progress_queue_messages_drive_the_status_line(tmp_path, monkeypatch):
         _close(app)
 
 
-# -- Not implemented yet -------------------------------------------------
+# -- Degraded-environment and shutdown paths -----------------------------
 
 
 def test_app_tolerates_a_missing_log_path(tmp_path, monkeypatch):
@@ -540,9 +540,6 @@ def test_app_tolerates_a_missing_log_path(tmp_path, monkeypatch):
         _close(app)
 
 
-@pytest.mark.xfail(
-    strict=True, reason="plan item: close-during-run guard (_run_active + _on_close)"
-)
 def test_close_during_run_is_guarded(tmp_path, monkeypatch):
     app, dialogs = _make_app(tmp_path, monkeypatch)
     release = threading.Event()
