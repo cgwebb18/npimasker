@@ -30,6 +30,11 @@ _cells_since_load = 0
 # costs ~0.3s, so amortized over this many cells it's free.
 _RELOAD_EVERY_CELLS = 50_000
 
+# Cells handed to nlp.pipe at once. Larger batches stop helping well
+# before this; the ceiling that matters is progress granularity, since
+# nothing is reported until a batch finishes.
+_BATCH_SIZE = 256
+
 
 def _get_nlp():
     """Lazily load the spaCy model so app startup stays fast when this
@@ -46,7 +51,7 @@ def _get_nlp():
         return _nlp
 
 
-def _recycle_nlp_if_stale():
+def _note_cells_processed(count: int = 1):
     """Drop the model once it has seen enough cells, so the next call
     reloads it with a fresh vocabulary (see _RELOAD_EVERY_CELLS).
 
@@ -56,7 +61,7 @@ def _recycle_nlp_if_stale():
     reference until it is itself collected.
     """
     global _nlp, _cells_since_load
-    _cells_since_load += 1
+    _cells_since_load += count
     if _cells_since_load < _RELOAD_EVERY_CELLS:
         return
     with _nlp_lock:
@@ -112,20 +117,54 @@ def _extended_end(doc, ent) -> int:
     return last.idx + len(last)
 
 
-def find_pii_spans(text: str) -> list[tuple[int, int]]:
-    """Return non-overlapping (start, end) spans of detected PII in text."""
-    if not text:
-        return []
-
+def _spans_from_doc(doc, text: str) -> list[tuple[int, int]]:
     spans = []
     for pattern in _REGEX_DETECTORS:
         for match in pattern.finditer(text):
             spans.append((match.start(), match.end()))
 
-    doc = _get_nlp()(text)
     for ent in doc.ents:
         if ent.label_ in _SENSITIVE_ENT_LABELS:
             spans.append((ent.start_char, _extended_end(doc, ent)))
 
-    _recycle_nlp_if_stale()
     return _merge_spans(spans)
+
+
+def find_pii_spans(text: str) -> list[tuple[int, int]]:
+    """Return non-overlapping (start, end) spans of detected PII in text."""
+    if not text:
+        return []
+
+    spans = _spans_from_doc(_get_nlp()(text), text)
+    _note_cells_processed()
+    return spans
+
+
+def find_pii_spans_batch(texts: list[str]) -> list[list[tuple[int, int]]]:
+    """find_pii_spans for many texts at once, in the same order.
+
+    Feeding the model one cell at a time leaves most of the batching in
+    spaCy's pipeline unused. Routing a whole chunk of cells through
+    nlp.pipe measured 2.2x faster with byte-identical spans (0 mismatches
+    over 3,000 texts), which matters because this is where essentially
+    all of a long run's time goes.
+
+    Only nlp.pipe is used, deliberately - `disable=["parser","lemmatizer"]`
+    looks like a free extra 11% but changed detection on 2 of those 3,000
+    texts, and disabling the tagger changes it on 345 (it feeds tok.pos_,
+    which _extended_end needs to complete partially-tagged names). Not
+    worth altering what a PII tool detects for a fraction of the win.
+    """
+    results: list[list[tuple[int, int]]] = [[] for _ in texts]
+    pending = [(i, text) for i, text in enumerate(texts) if text]
+    if not pending:
+        return results
+
+    nlp = _get_nlp()
+    docs = nlp.pipe([text for _, text in pending], batch_size=_BATCH_SIZE)
+    for (index, text), doc in zip(pending, docs):
+        results[index] = _spans_from_doc(doc, text)
+    # Recycle only once the batch is fully consumed: swapping the model
+    # out mid-pipe would leave the generator feeding off the old one.
+    _note_cells_processed(len(pending))
+    return results

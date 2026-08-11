@@ -17,7 +17,7 @@ from npimasker.crypto import (
     encrypt_text_spans,
     encrypt_value,
 )
-from npimasker.pii_detect import find_pii_spans
+from npimasker.pii_detect import find_pii_spans, find_pii_spans_batch
 from npimasker.sensitive_fields import is_whole_cell_header
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 _PROGRESS_INTERVAL_ROWS = 500
 _PROGRESS_INTERVAL_SECONDS = 2.0
 
+# Rows buffered before flushing, so scanned cells batch through the NER
+# model together. Small enough that progress still ticks regularly:
+# nothing is reported until a chunk finishes.
+_BATCH_ROWS = 500
 
 _SNIFF_CHUNK_BYTES = 1 << 20
 
@@ -228,34 +232,73 @@ def process_csv(
             [headers[i] for i in sorted(whole_cell) if not whole_cell[i]],
         )
 
-        for row_num, row in enumerate(reader, start=2):
-            new_row = list(row)
-            for idx in selected:
-                if idx >= len(new_row):
-                    continue
-                try:
-                    new_row[idx] = _transform_cell(
-                        new_row[idx], key, mode, whole_cell.get(idx, True)
-                    )
-                except WrongKeyError as exc:
-                    column_name = headers[idx] if idx < len(headers) else str(idx)
-                    raise WrongKeyError(
-                        f"{exc} (row {row_num}, column '{column_name}')"
-                    ) from exc
-            writer.writerow(new_row)
+        # Columns scanned for embedded PII rather than encrypted whole.
+        # Only these reach the NER model, and only when encrypting.
+        scanned = [idx for idx in sorted(selected) if not whole_cell.get(idx, True)]
 
-            rows_done = row_num - 1
-            now = time.monotonic()
-            if (
-                rows_done - last_reported_rows >= progress_interval_rows
-                or now - last_reported_at >= progress_interval_seconds
-            ):
-                last_reported_rows, last_reported_at = rows_done, now
-                logger.info(
-                    "process_csv progress: rows=%d, elapsed=%.1fs", rows_done, now - start
-                )
-                if progress_callback is not None:
-                    progress_callback(rows_done)
+        def _flush(buffered):
+            """Transform and write a chunk of rows.
+
+            Rows are buffered so every scanned cell in the chunk can go
+            through the model in one batch - one nlp.pipe call instead of
+            one nlp() call per cell.
+            """
+            nonlocal last_reported_rows, last_reported_at
+
+            precomputed = {}
+            if mode == "encrypt" and scanned:
+                cells = [
+                    (position, idx)
+                    for position, (_, row) in enumerate(buffered)
+                    for idx in scanned
+                    if idx < len(row) and row[idx]
+                ]
+                if cells:
+                    spans = find_pii_spans_batch(
+                        [buffered[position][1][idx] for position, idx in cells]
+                    )
+                    precomputed = dict(zip(cells, spans))
+
+            for position, (number, row) in enumerate(buffered):
+                for idx in selected:
+                    if idx >= len(row):
+                        continue
+                    try:
+                        spans = precomputed.get((position, idx))
+                        if spans is None:
+                            row[idx] = _transform_cell(
+                                row[idx], key, mode, whole_cell.get(idx, True)
+                            )
+                        else:
+                            row[idx] = encrypt_text_spans(row[idx], spans, key)
+                    except WrongKeyError as exc:
+                        column_name = headers[idx] if idx < len(headers) else str(idx)
+                        raise WrongKeyError(
+                            f"{exc} (row {number}, column '{column_name}')"
+                        ) from exc
+                writer.writerow(row)
+
+                rows_done = number - 1
+                now = time.monotonic()
+                if (
+                    rows_done - last_reported_rows >= progress_interval_rows
+                    or now - last_reported_at >= progress_interval_seconds
+                ):
+                    last_reported_rows, last_reported_at = rows_done, now
+                    logger.info(
+                        "process_csv progress: rows=%d, elapsed=%.1fs", rows_done, now - start
+                    )
+                    if progress_callback is not None:
+                        progress_callback(rows_done)
+
+        buffered = []
+        for row_num, row in enumerate(reader, start=2):
+            buffered.append((row_num, list(row)))
+            if len(buffered) >= _BATCH_ROWS:
+                _flush(buffered)
+                buffered = []
+        if buffered:
+            _flush(buffered)
 
     logger.info(
         "process_csv done: rows=%d, elapsed=%.1fs", row_num - 1, time.monotonic() - start
