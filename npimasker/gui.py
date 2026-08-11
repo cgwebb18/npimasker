@@ -1,18 +1,25 @@
 """Tkinter GUI for NPIMasker."""
 
+import logging
 import os
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from npimasker import __version__
 from npimasker.crypto import WrongKeyError, derive_key, generate_passphrase
 from npimasker.csv_processor import process_csv, read_headers
+from npimasker.logging_setup import setup_logging
 from npimasker.sensitive_fields import detect_sensitive_columns
+
+logger = logging.getLogger(__name__)
 
 
 class App(tk.Tk):
-    def __init__(self):
+    def __init__(self, log_path):
         super().__init__()
+        self.log_path = log_path
         self.title(f"NPIMasker v{__version__}")
         self.geometry("560x520")
         self.minsize(480, 440)
@@ -23,6 +30,17 @@ class App(tk.Tk):
         self.headers: list[str] = []
 
         self._build_widgets()
+
+    def report_callback_exception(self, exc, val, tb):
+        """Tkinter routes exceptions raised inside widget callbacks here
+        instead of to sys.excepthook, and its default behavior is to just
+        print to stderr - invisible in a --windowed build. Log and surface
+        them like any other failure."""
+        logger.critical("Unhandled error in UI callback", exc_info=(exc, val, tb))
+        messagebox.showerror(
+            "NPIMasker",
+            f"Unexpected error: {exc.__name__}: {val}\n\nDetails were written to:\n{self.log_path}",
+        )
 
     # -- UI construction -------------------------------------------------
 
@@ -86,7 +104,11 @@ class App(tk.Tk):
 
         run_frame = ttk.Frame(self)
         run_frame.pack(fill="x", **pad)
-        ttk.Button(run_frame, text="Run", command=self._run).pack(side="right")
+        ttk.Button(run_frame, text="Open Log Folder", command=self._open_log_folder).pack(
+            side="left"
+        )
+        self.run_button = ttk.Button(run_frame, text="Run", command=self._run)
+        self.run_button.pack(side="right")
 
         self.status_var = tk.StringVar(value="")
         ttk.Label(self, textvariable=self.status_var, foreground="gray").pack(
@@ -168,6 +190,18 @@ class App(tk.Tk):
         self.key_entry.delete(0, tk.END)
         self.key_entry.insert(0, passphrase)
 
+    def _open_log_folder(self):
+        log_dir = self.log_path.parent
+        try:
+            if sys.platform == "win32":
+                os.startfile(log_dir)  # noqa: S606 - opening our own log folder
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(log_dir)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(log_dir)], check=False)
+        except OSError as exc:
+            messagebox.showerror("NPIMasker", f"Could not open log folder:\n{log_dir}\n\n{exc}")
+
     def _run(self):
         input_path = self.input_path.get()
         output_path = self.output_path.get()
@@ -197,7 +231,11 @@ class App(tk.Tk):
             self.status_var.set("Failed: wrong key or corrupted file.")
             return
         except Exception as exc:  # surface everything: a windowed app has no stderr
-            messagebox.showerror("NPIMasker", f"Failed: {type(exc).__name__}: {exc}")
+            logger.exception("process_csv failed")
+            messagebox.showerror(
+                "NPIMasker",
+                f"Failed: {type(exc).__name__}: {exc}\n\nDetails were written to:\n{self.log_path}",
+            )
             self.status_var.set("Failed.")
             return
 
@@ -206,7 +244,8 @@ class App(tk.Tk):
 
 
 def main():
-    app = App()
+    log_path = setup_logging()
+    app = App(log_path)
     app.mainloop()
 
 
