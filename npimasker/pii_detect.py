@@ -26,9 +26,14 @@ _cells_since_load = 0
 # Measured on unique free-text cells: ~3.5 KB of RSS per cell, growing
 # linearly with no plateau (129 MB -> 269 MB over 40k cells), which is
 # what puts a large CSV into MemoryError territory on an 8 GB machine.
-# Reloading periodically returns the vocabulary to its baseline. The load
-# costs ~0.3s, so amortized over this many cells it's free.
-_RELOAD_EVERY_CELLS = 50_000
+# Reloading periodically returns the vocabulary to its baseline.
+#
+# The threshold sets how much growth is tolerated before resetting:
+# ~3.5 KB x 20k is about 70 MB. A reload costs ~0.3s against roughly 30s
+# of work for that many cells, so ~1% - cheap enough that a lower cap is
+# worth it. Set too high (50k was the first try) and a mid-size run pays
+# batching's buffers without ever reaching a reset.
+_RELOAD_EVERY_CELLS = 20_000
 
 # Cells handed to nlp.pipe at once. Larger batches stop helping well
 # before this; the ceiling that matters is progress granularity, since
