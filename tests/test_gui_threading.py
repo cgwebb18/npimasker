@@ -572,3 +572,103 @@ def test_close_during_run_is_guarded(tmp_path, monkeypatch):
     finally:
         release.set()
         _close(app)
+
+
+# -- Threaded column loading (Browse) -------------------------------------
+
+
+def test_columns_load_off_the_main_thread(tmp_path, monkeypatch):
+    """Sniffing the encoding scans the whole file, so reading headers
+    inline froze the window as soon as a file was picked."""
+    app, dialogs = _make_app(tmp_path, monkeypatch)
+    try:
+        input_path = tmp_path / "in.csv"
+        _write_csv(input_path, 5)
+
+        worker_threads = []
+        real_read_headers = gui.read_headers
+
+        def _slow_read_headers(path):
+            worker_threads.append(threading.current_thread())
+            time.sleep(0.3)
+            return real_read_headers(path)
+
+        monkeypatch.setattr(gui, "read_headers", _slow_read_headers)
+
+        app._load_columns_async(str(input_path))
+        assert app._loading_columns is True
+        assert _state(app) == "disabled", "Run must be blocked until columns exist"
+
+        ticks = _pump(app, lambda: not app._loading_columns, "the columns to load")
+
+        # The UI kept pumping while the read was in flight.
+        assert ticks > 3, ticks
+        # ...and the read happened somewhere other than the main thread.
+        assert worker_threads and worker_threads[0] is not threading.main_thread()
+
+        assert app.headers == HEADERS
+        assert list(app.columns_list.get(0, tk.END)) == HEADERS
+        # Sensitive columns pre-selected, ID left alone.
+        assert set(app.columns_list.curselection()) == {1, 2, 3}
+        assert _state(app) == "normal"
+    finally:
+        _close(app)
+
+
+def test_run_is_refused_while_columns_are_still_loading(tmp_path, monkeypatch):
+    app, dialogs = _make_app(tmp_path, monkeypatch)
+    try:
+        input_path = tmp_path / "in.csv"
+        _write_csv(input_path, 5)
+        _configure(app, input_path, tmp_path / "out.csv")
+
+        app._loading_columns = True
+        app._run()
+
+        assert [d[0] for d in dialogs] == ["warning"]
+        assert "columns" in dialogs[0][2]
+        assert app._run_active is False
+    finally:
+        _close(app)
+
+
+def test_unreadable_file_reports_an_error_and_clears_the_columns(tmp_path, monkeypatch):
+    app, dialogs = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(list(HEADERS))  # stale columns from a previous pick
+        app._load_columns_async(str(tmp_path / "does_not_exist.csv"))
+        _pump(app, lambda: not app._loading_columns, "the failed load to settle")
+
+        assert [d[0] for d in dialogs] == ["error"]
+        assert "Could not read CSV" in dialogs[0][2]
+        assert app.headers == []
+        assert list(app.columns_list.get(0, tk.END)) == []
+        assert _state(app) == "normal"
+    finally:
+        _close(app)
+
+
+def test_browsing_during_a_run_does_not_re_enable_the_run_button(tmp_path, monkeypatch):
+    """Browse stays available mid-run; finishing a header load must not
+    hand the Run button back while the worker is still going."""
+    app, dialogs = _make_app(tmp_path, monkeypatch)
+    release = threading.Event()
+    try:
+        monkeypatch.setattr(gui, "process_csv", lambda *a, **k: release.wait(30))
+        input_path = tmp_path / "in.csv"
+        _write_csv(input_path, 5)
+        _configure(app, input_path, tmp_path / "out.csv")
+
+        app._run()
+        assert app._run_active is True
+        assert _state(app) == "disabled"
+
+        app._load_columns_async(str(input_path))
+        _pump(app, lambda: not app._loading_columns, "the columns to load")
+
+        assert app._run_active is True
+        assert _state(app) == "disabled", "run was still in progress"
+        assert app.status_var.get() != "", "the run's status line was clobbered"
+    finally:
+        release.set()
+        _close(app)

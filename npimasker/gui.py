@@ -31,7 +31,9 @@ class App(tk.Tk):
         self.output_path = tk.StringVar()
         self.headers: list[str] = []
         self._progress_queue = None
+        self._header_queue = None
         self._run_active = False
+        self._loading_columns = False
 
         self._build_widgets()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -136,15 +138,59 @@ class App(tk.Tk):
         if not path:
             return
         self.input_path.set(path)
-        self._load_columns(path)
         self._suggest_output_path()
+        self._load_columns_async(path)
 
-    def _load_columns(self, path: str):
+    def _load_columns_async(self, path: str):
+        """Read the header row on a worker thread.
+
+        Reading headers means sniffing the encoding first, which scans the
+        whole file - so on a large CSV, or one on a network share, doing
+        this inline froze the window the moment the user picked a file.
+        That was the second of the two freezes; moving process_csv off the
+        main thread only fixed the first.
+        """
+        self._header_queue = queue.Queue()
+        self._set_loading_columns(True)
+        threading.Thread(
+            target=self._header_worker, args=(path,), daemon=True
+        ).start()
+        self.after(50, self._poll_headers)
+
+    def _header_worker(self, path: str):
         try:
-            self.headers = read_headers(path)
-        except OSError as exc:
-            messagebox.showerror("NPIMasker", f"Could not read CSV: {exc}")
-            self.headers = []
+            headers = read_headers(path)
+        except Exception as exc:  # surface everything: a windowed app has no stderr
+            logger.exception("read_headers failed")
+            self._header_queue.put(("error", exc))
+        else:
+            self._header_queue.put(("headers", headers))
+
+    def _poll_headers(self):
+        try:
+            kind, payload = self._header_queue.get_nowait()
+        except queue.Empty:
+            self.after(50, self._poll_headers)
+            return
+
+        self._set_loading_columns(False)
+        if kind == "error":
+            messagebox.showerror("NPIMasker", f"Could not read CSV: {payload}{self._log_hint()}")
+            self._populate_columns([])
+        else:
+            self._populate_columns(payload)
+
+    def _set_loading_columns(self, loading: bool):
+        self._loading_columns = loading
+        # Don't stomp on a run in progress: Browse stays available during
+        # one, and the run owns the status line and the Run button.
+        if self._run_active:
+            return
+        self.run_button.config(state="disabled" if loading else "normal")
+        self.status_var.set("Reading columns..." if loading else "")
+
+    def _populate_columns(self, headers: list[str]):
+        self.headers = headers
         self.columns_list.delete(0, tk.END)
         sensitive = set(detect_sensitive_columns(self.headers))
         for i, header in enumerate(self.headers):
@@ -227,6 +273,11 @@ class App(tk.Tk):
         selected = list(self.columns_list.curselection())
         mode = self.mode.get()
 
+        if self._loading_columns:
+            messagebox.showwarning(
+                "NPIMasker", "Still reading that file's columns - try again in a moment."
+            )
+            return
         if not input_path:
             messagebox.showwarning("NPIMasker", "Choose an input CSV file first.")
             return
@@ -296,7 +347,7 @@ class App(tk.Tk):
 
     def _finish_run(self):
         self._run_active = False
-        self.run_button.config(state="normal")
+        self.run_button.config(state="disabled" if self._loading_columns else "normal")
 
     def _on_close(self):
         """Confirm before quitting mid-run. The worker is a daemon thread,
