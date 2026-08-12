@@ -11,6 +11,7 @@ ciphertext.
 """
 
 import base64
+import binascii
 import re
 import secrets
 from functools import lru_cache
@@ -45,6 +46,66 @@ def contains_marker(text: str) -> bool:
     through decryption untouched and must not be refused.
     """
     return _MARKER_RE.search(text) is not None
+
+
+# A Fernet token is 1 version byte + 8 timestamp + 16 IV + >=16 ciphertext
+# + 32 HMAC, so 73 bytes at minimum, which base64 to 100 characters.
+_MIN_TOKEN_BYTES = 73
+_MIN_TOKEN_CHARS = 100
+_FERNET_VERSION = 0x80
+
+
+def looks_like_token(value: str) -> bool:
+    """Whether the entire value is a Fernet token produced by this tool.
+
+    Used by decryption to tell a whole-cell-encrypted value from one that
+    holds [[ENC:...]] markers, without having to trust that the column
+    header still reads the way it did when the file was encrypted.
+
+    Decoding rather than pattern-matching the "gAAAAA" prefix: the prefix
+    is an artefact of the version byte plus a timestamp whose high bytes
+    happen to be zero, so it is only stable for as long as that stays
+    true, whereas the version byte is part of the format. validate=True
+    matters - without it base64 silently discards characters outside the
+    alphabet, so ordinary prose could decode to something plausible.
+
+    A false positive is possible in principle: any value that decodes to
+    73+ bytes beginning 0x80 is indistinguishable from a token until the
+    HMAC is checked. Such a value takes the whole-cell path and raises
+    WrongKeyError. That is the right way round - the alternative is
+    treating a real token as plaintext and returning ciphertext silently.
+    """
+    if len(value) < _MIN_TOKEN_CHARS:
+        return False
+    try:
+        raw = base64.b64decode(value, altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(raw) >= _MIN_TOKEN_BYTES and raw[0] == _FERNET_VERSION
+
+
+# Every Fernet token this tool emits starts with these characters: they are
+# the base64 of the 0x80 version byte plus the five leading zero bytes of an
+# 8-byte big-endian timestamp, which stay zero until roughly the year 36000.
+_TOKEN_PREFIX = "gAAAAA"
+
+
+def looks_like_damaged_token(value: str) -> bool:
+    """Whether a value opens like a Fernet token but is not a valid one.
+
+    Truncation is the realistic way an encrypted cell gets damaged - a
+    spreadsheet clipping a long field, a bad export. Without this the
+    damaged value matches neither shape and decryption returns it as
+    "plaintext", which means handing back ciphertext with no error: the
+    exact failure the content-based dispatch exists to remove.
+
+    A prefix is a weaker signal than the decode looks_like_token does, and
+    it is used only to escalate to a loud error - never to decide that
+    something *is* a token. Wrong in one direction it reports a corrupt
+    cell that was really prose beginning "gAAAAA"; wrong in the other it
+    just stops catching a corruption it never caught before.
+    """
+    return value.startswith(_TOKEN_PREFIX) and not looks_like_token(value)
 
 
 def generate_passphrase() -> str:

@@ -18,6 +18,8 @@ from npimasker.crypto import (
     decrypt_value,
     encrypt_text_spans,
     encrypt_value,
+    looks_like_damaged_token,
+    looks_like_token,
 )
 from npimasker.pii_detect import find_pii_spans, find_pii_spans_batch
 from npimasker.sensitive_fields import is_whole_cell_header
@@ -154,12 +156,39 @@ def read_headers(input_path: str) -> list[str]:
         return next(reader, [])
 
 
+def _decrypt_cell(value: str, key: bytes) -> str:
+    """Decrypt a cell, inferring how it was encrypted from its content.
+
+    Encryption is header-driven, but decryption must not be: nothing stops
+    a column being renamed, or selected differently, between the two runs.
+    When it is, a header-driven decrypt takes the wrong path - and the
+    whole-cell-encrypted-then-scanned direction finds no markers and
+    returns the cell untouched, i.e. hands back ciphertext with no error
+    at all.
+
+    The data already says which it is, unambiguously: a Fernet token is
+    urlsafe-base64 and so cannot contain "[", meaning the two encrypted
+    shapes are disjoint. Markers are checked first, since a marker wraps a
+    token and only the outer shape is the right one to act on.
+    """
+    if contains_marker(value):
+        return decrypt_text_spans(value, key)
+    if looks_like_token(value):
+        return decrypt_value(value, key)
+    if looks_like_damaged_token(value):
+        raise WrongKeyError(
+            "A value starts like an encrypted value but is truncated or "
+            "corrupted, so it cannot be decrypted."
+        )
+    return value  # never encrypted, or already decrypted
+
+
 def _transform_cell(value: str, key: bytes, mode: str, whole_cell: bool) -> str:
+    if mode == "decrypt":
+        return _decrypt_cell(value, key)
     if whole_cell:
-        return encrypt_value(value, key) if mode == "encrypt" else decrypt_value(value, key)
-    if mode == "encrypt":
-        return encrypt_text_spans(value, find_pii_spans(value), key)
-    return decrypt_text_spans(value, key)
+        return encrypt_value(value, key)
+    return encrypt_text_spans(value, find_pii_spans(value), key)
 
 
 def process_csv(
