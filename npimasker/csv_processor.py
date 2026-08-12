@@ -11,7 +11,9 @@ import threading
 import time
 
 from npimasker.crypto import (
+    AlreadyEncryptedError,
     WrongKeyError,
+    contains_marker,
     decrypt_text_spans,
     decrypt_value,
     encrypt_text_spans,
@@ -253,6 +255,15 @@ def process_csv(
                     for idx in scanned
                     if idx < len(row) and row[idx]
                 ]
+                for position, idx in cells:
+                    if contains_marker(buffered[position][1][idx]):
+                        raise AlreadyEncryptedError(
+                            f"Row {buffered[position][0]}, column "
+                            f"'{headers[idx]}' already contains NPIMasker "
+                            f"encryption markers. This file looks like it has "
+                            f"already been encrypted - decrypt it first, or "
+                            f"choose a different input file."
+                        )
                 if cells:
                     spans = find_pii_spans_batch(
                         [buffered[position][1][idx] for position, idx in cells]

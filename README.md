@@ -35,6 +35,11 @@ columns get this treatment vs. whole-cell encryption.
 If you decrypt with the wrong key, or a value got corrupted, NPIMasker shows
 a clear error instead of silently producing garbage.
 
+If you accidentally point **Encrypt** at a file that has already been
+encrypted, NPIMasker stops and tells you, naming the row and column, rather
+than encrypting it a second time. Decrypt that file first, or pick a
+different input.
+
 ## Troubleshooting
 
 Every run writes a log file with timing/progress info and full tracebacks

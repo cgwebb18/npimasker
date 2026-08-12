@@ -10,7 +10,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from npimasker import __version__
-from npimasker.crypto import WrongKeyError, derive_key, generate_passphrase
+from npimasker.crypto import (
+    AlreadyEncryptedError,
+    WrongKeyError,
+    derive_key,
+    generate_passphrase,
+)
 from npimasker.csv_processor import process_csv, read_headers
 from npimasker.logging_setup import setup_logging
 from npimasker.sensitive_fields import detect_sensitive_columns
@@ -366,6 +371,10 @@ class App(tk.Tk):
         if isinstance(exc, WrongKeyError):
             messagebox.showerror("NPIMasker", str(exc))
             self.status_var.set("Failed: wrong key or corrupted file.")
+        elif isinstance(exc, AlreadyEncryptedError):
+            # A wrong-file mistake, not a failure - no log pointer needed.
+            messagebox.showerror("NPIMasker", str(exc))
+            self.status_var.set("Failed: input is already encrypted.")
         else:
             messagebox.showerror(
                 "NPIMasker", f"Failed: {type(exc).__name__}: {exc}{self._log_hint()}"

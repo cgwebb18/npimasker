@@ -28,6 +28,25 @@ class WrongKeyError(Exception):
     """Raised when a value can't be decrypted with the given key."""
 
 
+class AlreadyEncryptedError(Exception):
+    """Raised when text to be encrypted already holds an [[ENC:...]] marker.
+
+    Deliberately not a WrongKeyError: it is a fixable mistake about which
+    file was chosen, not a key problem, and the two need different advice.
+    """
+
+
+def contains_marker(text: str) -> bool:
+    """Whether text already holds a syntactically valid [[ENC:...]] marker.
+
+    Matched with the same pattern the decrypter uses, so this is true for
+    exactly the text that would later be fed to decrypt_value - no more.
+    Marker-shaped but invalid text ("[[ENC:]]", "[[ENC: spaced ]]") passes
+    through decryption untouched and must not be refused.
+    """
+    return _MARKER_RE.search(text) is not None
+
+
 def generate_passphrase() -> str:
     """Generate a strong random key string for the user to save."""
     return secrets.token_urlsafe(32)

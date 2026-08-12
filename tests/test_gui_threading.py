@@ -672,3 +672,32 @@ def test_browsing_during_a_run_does_not_re_enable_the_run_button(tmp_path, monke
     finally:
         release.set()
         _close(app)
+
+
+def test_already_encrypted_input_gets_its_own_message(tmp_path, monkeypatch):
+    """A wrong-file mistake, not a crash: distinct status text, and no
+    "see the log" pointer since there is nothing to diagnose."""
+    app, dialogs = _make_app(tmp_path, monkeypatch)
+    try:
+        input_path = tmp_path / "in.csv"
+        output_path = tmp_path / "out.csv"
+        _write_csv(input_path, 5)
+        _configure(app, input_path, output_path)
+
+        def _raise(*a, **k):
+            raise gui.AlreadyEncryptedError(
+                "Row 2, column 'Notes' already contains NPIMasker encryption "
+                "markers. This file looks like it has already been encrypted "
+                "- decrypt it first, or choose a different input file."
+            )
+
+        monkeypatch.setattr(gui, "process_csv", _raise)
+        _run_to_completion(app, dialogs)
+
+        assert app.status_var.get() == "Failed: input is already encrypted."
+        assert [d[0] for d in dialogs] == ["error"]
+        assert "already been encrypted" in dialogs[0][2]
+        assert "Details were written to" not in dialogs[0][2]
+        assert _state(app) == "normal"
+    finally:
+        _close(app)

@@ -206,10 +206,12 @@ def test_decrypt_text_spans_handles_many_markers_in_one_string():
 
 
 def test_marker_like_text_that_is_not_a_valid_token_raises_on_decrypt():
-    # ROUGH EDGE (documented, not fixed): decrypt_text_spans trusts anything
-    # shaped like [[ENC:<base64ish>]]. Free text that happens to contain such
-    # a string is treated as a real token and blows up the whole decrypt run
-    # with "wrong key or corrupted file", which is a misleading message.
+    # decrypt_text_spans trusts anything shaped like [[ENC:<base64ish>]], so
+    # free text containing such a string is treated as a real token and blows
+    # up the whole decrypt run with a misleading "wrong key" message.
+    # process_csv now refuses to *create* such a file (see
+    # tests/test_already_encrypted.py); this pins the low-level behaviour,
+    # which still applies to a hand-edited or externally-supplied file.
     text = "see ticket [[ENC:notarealtoken]] for details"
     with pytest.raises(WrongKeyError):
         decrypt_text_spans(text, KEY)
@@ -227,7 +229,8 @@ def test_encrypting_a_span_inside_marker_like_text_still_round_trips():
     encrypted = encrypt_text_spans(text, [(start, start + len("Jane Doe"))], KEY)
     assert "Jane Doe" not in encrypted
     # The pre-existing literal marker is still there, and it is what makes
-    # the decrypt of this cell fail (same rough edge as above).
+    # the decrypt of this cell fail. process_csv's guard is what stops a
+    # cell like this reaching encryption in the first place.
     assert "[[ENC:notarealtoken]]" in encrypted
     with pytest.raises(WrongKeyError):
         decrypt_text_spans(encrypted, KEY)
