@@ -51,8 +51,13 @@ def _normalize(header: str) -> str:
 
 
 def _matches_any(header: str, keywords: list[str]) -> bool:
+    # Normalize the keywords too, not just the header. _normalize turns
+    # every non-alphanumeric character into a space, so a keyword written
+    # with punctuation ("e-mail") could never match any header - not even
+    # a header spelled the same way. That silently disabled the "e-mail"
+    # keyword entirely, leaving an "E-Mail" column unticked by default.
     normalized = f" {_normalize(header)} "
-    return any(f" {kw} " in normalized for kw in keywords)
+    return any(f" {_normalize(kw)} " in normalized for kw in keywords)
 
 
 def is_sensitive_header(header: str) -> bool:

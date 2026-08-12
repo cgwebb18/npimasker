@@ -35,6 +35,32 @@ columns get this treatment vs. whole-cell encryption.
 If you decrypt with the wrong key, or a value got corrupted, NPIMasker shows
 a clear error instead of silently producing garbage.
 
+If you accidentally point **Encrypt** at a file that has already been
+encrypted, NPIMasker stops and tells you, naming the row and column, rather
+than encrypting it a second time. Decrypt that file first, or pick a
+different input.
+
+## Troubleshooting
+
+Every run writes a log file with timing/progress info and full tracebacks
+for any error or crash. If something goes wrong, click **Open Log Folder**
+(next to Run) and send us `npimasker.log` from that folder.
+
+The log lives at `%LOCALAPPDATA%\NPIMasker\logs\npimasker.log` on Windows. If
+that folder can't be written to, NPIMasker falls back to your temp folder,
+and if that fails too it carries on without a log rather than refusing to
+start — **Open Log Folder** always tells you which case you're in.
+
+The log records timings, row counts, and the *names* of the columns you
+selected. It deliberately does **not** record any cell values, or the folder
+your file came from — only the file's name — since a path like
+`\\share\patients\Smith_John_1970\` is itself sensitive.
+
+If a run fails or you quit partway through, no output file is written at all:
+you'll never be left with a half-encrypted CSV that looks finished. An
+existing output file from a previous run is left untouched unless the new run
+succeeds.
+
 ## Building the app
 
 - **Windows (.exe):**

@@ -13,6 +13,7 @@ ciphertext.
 import base64
 import re
 import secrets
+from functools import lru_cache
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
@@ -25,6 +26,25 @@ _MARKER_RE = re.compile(r"\[\[ENC:([A-Za-z0-9_\-=]+)\]\]")
 
 class WrongKeyError(Exception):
     """Raised when a value can't be decrypted with the given key."""
+
+
+class AlreadyEncryptedError(Exception):
+    """Raised when text to be encrypted already holds an [[ENC:...]] marker.
+
+    Deliberately not a WrongKeyError: it is a fixable mistake about which
+    file was chosen, not a key problem, and the two need different advice.
+    """
+
+
+def contains_marker(text: str) -> bool:
+    """Whether text already holds a syntactically valid [[ENC:...]] marker.
+
+    Matched with the same pattern the decrypter uses, so this is true for
+    exactly the text that would later be fed to decrypt_value - no more.
+    Marker-shaped but invalid text ("[[ENC:]]", "[[ENC: spaced ]]") passes
+    through decryption untouched and must not be refused.
+    """
+    return _MARKER_RE.search(text) is not None
 
 
 def generate_passphrase() -> str:
@@ -44,11 +64,24 @@ def derive_key(passphrase: str) -> bytes:
     return base64.urlsafe_b64encode(derived)
 
 
+@lru_cache(maxsize=4)
+def _fernet(key: bytes) -> Fernet:
+    """Reuse the Fernet for a given key instead of rebuilding it per cell.
+
+    Fernet.__init__ base64-decodes the key, splits it and sets up the
+    cipher - about 1us, which is ~14% of the cost of encrypting a short
+    value. It holds no per-message state: the IV comes from os.urandom
+    and the timestamp from time.time(), both inside encrypt(), so reusing
+    the object cannot make two ciphertexts repeat.
+    """
+    return Fernet(key)
+
+
 def encrypt_value(value: str, key: bytes) -> str:
     """Encrypt a single cell value. Empty values pass through unchanged."""
     if value == "":
         return value
-    return Fernet(key).encrypt(value.encode("utf-8")).decode("utf-8")
+    return _fernet(key).encrypt(value.encode("utf-8")).decode("utf-8")
 
 
 def decrypt_value(token: str, key: bytes) -> str:
@@ -56,7 +89,7 @@ def decrypt_value(token: str, key: bytes) -> str:
     if token == "":
         return token
     try:
-        return Fernet(key).decrypt(token.encode("utf-8")).decode("utf-8")
+        return _fernet(key).decrypt(token.encode("utf-8")).decode("utf-8")
     except (InvalidToken, ValueError) as exc:
         raise WrongKeyError(
             "Wrong key or corrupted file: could not decrypt a value."
