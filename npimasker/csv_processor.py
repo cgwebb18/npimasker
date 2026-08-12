@@ -197,17 +197,29 @@ def process_csv(
     key: bytes,
     mode: str,
     selected_columns: list[int],
+    whole_cell_overrides: dict[int, bool] | None = None,
     progress_callback=None,
     progress_interval_rows: int = _PROGRESS_INTERVAL_ROWS,
     progress_interval_seconds: float = _PROGRESS_INTERVAL_SECONDS,
 ) -> None:
     """Encrypt or decrypt the selected columns of a CSV, row by row.
 
-    Columns whose header names a whole-cell category (name, phone, address,
-    NPI/medical record/insurance) are encrypted/decrypted as a whole cell.
-    Other selected columns are scanned for PII spans (emails, SSNs, dates,
-    and person names via NER) and only those spans are encrypted/decrypted,
-    leaving the rest of the cell's text untouched.
+    When encrypting, columns whose header names a whole-cell category
+    (name, phone, address, NPI/medical record/insurance) are encrypted as a
+    whole cell. Other selected columns are scanned for PII spans (emails,
+    SSNs, dates, and person names via NER) and only those spans are
+    encrypted, leaving the rest of the cell's text untouched.
+
+    `whole_cell_overrides` maps a column index to True (encrypt whole) or
+    False (scan), overriding that header heuristic. Indices it does not
+    mention - and the default of None - keep the heuristic, so callers that
+    do not pass it behave exactly as before. Forcing a column whole is also
+    the way to keep a large free-text column away from the NER model, which
+    is where essentially all the runtime goes.
+
+    When decrypting, both are ignored: each cell's treatment is inferred
+    from its own content (see _decrypt_cell), so a file still decrypts
+    correctly after a column has been renamed or selected differently.
 
     Columns not in `selected_columns` are copied through unchanged.
     Raises WrongKeyError (with row/column context) if a decrypt fails.
@@ -252,8 +264,11 @@ def process_csv(
             raise ValueError("Input CSV is empty.")
         writer.writerow(headers)
 
+        overrides = whole_cell_overrides or {}
         whole_cell = {
-            idx: is_whole_cell_header(headers[idx]) for idx in selected if idx < len(headers)
+            idx: overrides.get(idx, is_whole_cell_header(headers[idx]))
+            for idx in selected
+            if idx < len(headers)
         }
         # Header names, not indices: they're not PII, and "which columns
         # did they actually pick" is the first thing we need when triaging.
