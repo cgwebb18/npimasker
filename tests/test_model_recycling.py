@@ -130,3 +130,15 @@ def test_empty_text_does_not_count_toward_the_recycle_budget(monkeypatch):
     for _ in range(10):
         find_pii_spans("")
     assert pii_detect._cells_since_load == 0
+
+
+def test_reload_threshold_is_at_the_measured_sweet_spot():
+    """A tripwire against drift, paired with the one in test_batching.
+
+    This is a memory-vs-time dial: the threshold is how much vocabulary
+    growth is tolerated before a reset, at ~0.3s per reload. 10k is about
+    35 MB of amplitude for ~2% overhead. Set it too high and a mid-size
+    run pays for batching's buffers without ever reaching a reset, which
+    is what made 50k worse than no recycling at all.
+    """
+    assert pii_detect._RELOAD_EVERY_CELLS == 10_000

@@ -28,17 +28,35 @@ _cells_since_load = 0
 # what puts a large CSV into MemoryError territory on an 8 GB machine.
 # Reloading periodically returns the vocabulary to its baseline.
 #
-# The threshold sets how much growth is tolerated before resetting:
-# ~3.5 KB x 20k is about 70 MB. A reload costs ~0.3s against roughly 30s
-# of work for that many cells, so ~1% - cheap enough that a lower cap is
-# worth it. Set too high (50k was the first try) and a mid-size run pays
-# batching's buffers without ever reaching a reset.
-_RELOAD_EVERY_CELLS = 20_000
+# The threshold sets how much growth is tolerated before resetting, so it
+# is really a memory-vs-time dial. Measured on a high-cardinality corpus
+# at ~3.5 KB/cell, against ~0.3s per reload:
+#
+#     50k -> ~175 MB amplitude, ~0.4% overhead  (too high: a mid-size run
+#                                                never reaches a reset)
+#     20k -> ~70 MB,  ~1%
+#     10k -> ~35 MB,  ~2%   <- chosen
+#      5k -> ~17 MB,  ~4%
+#
+# Real data repeats more than that corpus does, interning fewer new
+# strings per cell, so the true amplitude should come in under these.
+_RELOAD_EVERY_CELLS = 10_000
 
-# Cells handed to nlp.pipe at once. Larger batches stop helping well
-# before this; the ceiling that matters is progress granularity, since
-# nothing is reported until a batch finishes.
-_BATCH_SIZE = 256
+# Cells handed to nlp.pipe at once. Throughput saturates at 64 while peak
+# memory keeps climbing roughly linearly past it, because this many Doc
+# objects are alive simultaneously. Measured over 6,000 free-text cells:
+#
+#     per-cell   4.08 ms/cell   +28 MB   (what batching replaced)
+#           16   2.40           +33
+#           32   2.27           +35
+#           64   2.21           +48      <- chosen
+#          128   2.19           +66
+#          256   2.19          +118      (70 MB more than 64, for 0.9%)
+#         1024   2.22          +394
+#
+# Subtracting the ~28 MB of vocab growth common to every row, the Doc
+# buffer itself is ~20 MB here against ~90 MB at 256.
+_BATCH_SIZE = 64
 
 
 def _get_nlp():

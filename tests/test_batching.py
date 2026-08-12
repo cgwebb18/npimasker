@@ -154,3 +154,18 @@ def test_ragged_rows_survive_buffering(tmp_path, monkeypatch):
     back = tmp_path / "back.csv"
     process_csv(str(out), str(back), KEY, "decrypt", [1])
     assert back.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+
+
+def test_batch_size_is_at_the_measured_sweet_spot():
+    """A tripwire, not a memory assertion (those are flaky).
+
+    Throughput saturates at 64 while peak memory keeps climbing roughly
+    linearly past it, because that many Doc objects are alive at once.
+    Measured over 6,000 free-text cells: 64 -> 2.21 ms/cell at +48 MB,
+    256 -> 2.19 ms/cell at +118 MB. Raising this back up buys under 1%
+    and costs ~70 MB, so re-read the table in pii_detect before changing
+    it.
+    """
+    from npimasker import pii_detect
+
+    assert pii_detect._BATCH_SIZE == 64
