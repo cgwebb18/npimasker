@@ -14,12 +14,30 @@ columns get this treatment vs. whole-cell encryption.
 
 1. Get `NPIMasker.exe` (see "Building the .exe" below) and double-click it.
 2. Choose **Encrypt** or **Decrypt**.
-3. Click **Browse...** and pick your CSV file. The column list will show every
-   column, with sensitive-looking ones (name, email, phone, address, etc.)
-   already checked — untick/tick as needed. Tick any free-text column (like
-   "Notes") too if it might contain embedded names, emails, SSNs, or dates —
-   NPIMasker will only encrypt the sensitive part of that text, not the whole
-   cell.
+3. Click **Browse...** and pick your CSV file. The column list shows every
+   column with how it will be treated. Click a row (or select it and press
+   **Space**) to cycle through the three options:
+   - **Skip** — copied through unchanged.
+   - **Scan for sensitive text** — only the sensitive parts of the cell are
+     encrypted, leaving the rest of the text readable. Use this for
+     free-text columns like "Notes".
+   - **Encrypt whole cell** — the entire value is encrypted, whatever it
+     contains.
+
+   Sensitive-looking columns (name, email, phone, address, etc.) start on a
+   sensible default, so you can leave this alone if you want. Two reasons to
+   change it:
+   - **Certainty.** Scanning is best-effort — it can miss an unusual or
+     all-lowercase name. If a free-text column is sensitive throughout (a
+     clinical note, say), set it to **Encrypt whole cell** and nothing can
+     slip through.
+   - **Speed.** Scanning is where nearly all the running time goes. On a
+     large file, switching free-text columns to **Encrypt whole cell** turns
+     a run that takes many minutes into one that takes seconds.
+
+   In **Decrypt** mode the two encrypted options collapse into a single
+   **Decrypt**, because decryption works out for itself how each value was
+   encrypted (see below).
 4. Set the key:
    - First time: click **Generate & Save Key...** to create a strong random
      key and save it to a `.key` file. **Keep this file safe** — anyone who
@@ -117,8 +135,8 @@ pytest tests/
 
 ## How detection works
 
-For each column you select, NPIMasker decides how to handle it based on the
-column header:
+When **encrypting**, each selected column is treated according to what you
+picked in the column list. The defaults come from the column header:
 
 - **Whole-cell columns** — headers matching Name, Phone, Address/Street/
   City/State/Zip, or NPI/Medical record/MRN/Insurance/Policy number are
@@ -145,6 +163,22 @@ column header:
     detect embedded street addresses or phone numbers in free text (put
     those in dedicated, whole-cell columns instead if you need them
     protected reliably).
+
+When **decrypting**, the header is not consulted at all: each cell says what
+it is. A cell holding `[[ENC:...]]` markers has those markers swapped back
+for plaintext; a cell that is entirely one encrypted value is decrypted
+whole; anything else was never encrypted and is passed through untouched.
+
+This is why you don't have to remember what you chose when you encrypted, and
+why renaming a column between encrypting and decrypting is harmless. (It used
+to be actively dangerous: decryption made the same header-based guess
+independently, and if the two disagreed it could hand back a file that still
+held encrypted values without reporting anything wrong.)
+
+A value that *starts* like an encrypted value but has been damaged — a
+spreadsheet clipping a long field, say — is reported as an error rather than
+passed through, so a corrupted file can't quietly look like a successful
+decryption.
 
 ## How the encryption works
 
