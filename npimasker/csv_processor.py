@@ -18,6 +18,8 @@ from npimasker.crypto import (
     decrypt_value,
     encrypt_text_spans,
     encrypt_value,
+    looks_like_damaged_token,
+    looks_like_token,
 )
 from npimasker.pii_detect import find_pii_spans, find_pii_spans_batch
 from npimasker.sensitive_fields import is_whole_cell_header
@@ -154,12 +156,39 @@ def read_headers(input_path: str) -> list[str]:
         return next(reader, [])
 
 
+def _decrypt_cell(value: str, key: bytes) -> str:
+    """Decrypt a cell, inferring how it was encrypted from its content.
+
+    Encryption is header-driven, but decryption must not be: nothing stops
+    a column being renamed, or selected differently, between the two runs.
+    When it is, a header-driven decrypt takes the wrong path - and the
+    whole-cell-encrypted-then-scanned direction finds no markers and
+    returns the cell untouched, i.e. hands back ciphertext with no error
+    at all.
+
+    The data already says which it is, unambiguously: a Fernet token is
+    urlsafe-base64 and so cannot contain "[", meaning the two encrypted
+    shapes are disjoint. Markers are checked first, since a marker wraps a
+    token and only the outer shape is the right one to act on.
+    """
+    if contains_marker(value):
+        return decrypt_text_spans(value, key)
+    if looks_like_token(value):
+        return decrypt_value(value, key)
+    if looks_like_damaged_token(value):
+        raise WrongKeyError(
+            "A value starts like an encrypted value but is truncated or "
+            "corrupted, so it cannot be decrypted."
+        )
+    return value  # never encrypted, or already decrypted
+
+
 def _transform_cell(value: str, key: bytes, mode: str, whole_cell: bool) -> str:
+    if mode == "decrypt":
+        return _decrypt_cell(value, key)
     if whole_cell:
-        return encrypt_value(value, key) if mode == "encrypt" else decrypt_value(value, key)
-    if mode == "encrypt":
-        return encrypt_text_spans(value, find_pii_spans(value), key)
-    return decrypt_text_spans(value, key)
+        return encrypt_value(value, key)
+    return encrypt_text_spans(value, find_pii_spans(value), key)
 
 
 def process_csv(
@@ -168,17 +197,29 @@ def process_csv(
     key: bytes,
     mode: str,
     selected_columns: list[int],
+    whole_cell_overrides: dict[int, bool] | None = None,
     progress_callback=None,
     progress_interval_rows: int = _PROGRESS_INTERVAL_ROWS,
     progress_interval_seconds: float = _PROGRESS_INTERVAL_SECONDS,
 ) -> None:
     """Encrypt or decrypt the selected columns of a CSV, row by row.
 
-    Columns whose header names a whole-cell category (name, phone, address,
-    NPI/medical record/insurance) are encrypted/decrypted as a whole cell.
-    Other selected columns are scanned for PII spans (emails, SSNs, dates,
-    and person names via NER) and only those spans are encrypted/decrypted,
-    leaving the rest of the cell's text untouched.
+    When encrypting, columns whose header names a whole-cell category
+    (name, phone, address, NPI/medical record/insurance) are encrypted as a
+    whole cell. Other selected columns are scanned for PII spans (emails,
+    SSNs, dates, and person names via NER) and only those spans are
+    encrypted, leaving the rest of the cell's text untouched.
+
+    `whole_cell_overrides` maps a column index to True (encrypt whole) or
+    False (scan), overriding that header heuristic. Indices it does not
+    mention - and the default of None - keep the heuristic, so callers that
+    do not pass it behave exactly as before. Forcing a column whole is also
+    the way to keep a large free-text column away from the NER model, which
+    is where essentially all the runtime goes.
+
+    When decrypting, both are ignored: each cell's treatment is inferred
+    from its own content (see _decrypt_cell), so a file still decrypts
+    correctly after a column has been renamed or selected differently.
 
     Columns not in `selected_columns` are copied through unchanged.
     Raises WrongKeyError (with row/column context) if a decrypt fails.
@@ -223,8 +264,11 @@ def process_csv(
             raise ValueError("Input CSV is empty.")
         writer.writerow(headers)
 
+        overrides = whole_cell_overrides or {}
         whole_cell = {
-            idx: is_whole_cell_header(headers[idx]) for idx in selected if idx < len(headers)
+            idx: overrides.get(idx, is_whole_cell_header(headers[idx]))
+            for idx in selected
+            if idx < len(headers)
         }
         # Header names, not indices: they're not PII, and "which columns
         # did they actually pick" is the first thing we need when triaging.

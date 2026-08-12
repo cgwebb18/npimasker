@@ -21,7 +21,7 @@ import types
 import pytest
 
 from npimasker import gui
-from npimasker.crypto import WrongKeyError, derive_key
+from npimasker.crypto import WrongKeyError, derive_key, looks_like_token
 from npimasker.csv_processor import process_csv
 
 try:
@@ -99,18 +99,30 @@ def _make_app(tmp_path, monkeypatch, askyesno=True):
 
 
 def _configure(app, input_path, output_path, mode="encrypt", passphrase=PASSPHRASE,
-               columns=COLUMNS):
+               columns=COLUMNS, treatment=gui.WHOLE):
     app.mode.set(mode)
     app.input_path.set(str(input_path))
     app.output_path.set(str(output_path))
     app.key_entry.delete(0, tk.END)
     app.key_entry.insert(0, passphrase)
-    app.headers = list(HEADERS)
-    app.columns_list.delete(0, tk.END)
-    for header in HEADERS:
-        app.columns_list.insert(tk.END, header)
-    for index in columns:
-        app.columns_list.selection_set(index)
+    app._populate_columns(list(HEADERS))
+    for index in range(len(HEADERS)):
+        app.set_column_treatment(index, treatment if index in columns else gui.SKIP)
+
+
+def _tree_rows(app):
+    """The (column, treatment) pairs the Treeview is actually displaying."""
+    tree = app.columns_tree
+    return [tuple(tree.item(iid, "values")) for iid in tree.get_children("")]
+
+
+def _tree_headers(app):
+    return [row[0] for row in _tree_rows(app)]
+
+
+def _active(app):
+    """Indices the user has asked to be processed, whatever the treatment."""
+    return {i for i, t in app.column_treatments().items() if t != gui.SKIP}
 
 
 def _state(app):
@@ -420,7 +432,7 @@ def test_worker_only_emits_queue_messages_on_success(tmp_path, monkeypatch):
 
         thread = threading.Thread(
             target=app._process_worker,
-            args=(str(input_path), str(output_path), KEY, "encrypt", list(COLUMNS)),
+            args=(str(input_path), str(output_path), KEY, "encrypt", list(COLUMNS), {}),
             daemon=True,
         )
         thread.start()
@@ -457,7 +469,7 @@ def test_worker_puts_the_exception_on_the_queue_instead_of_raising(tmp_path, mon
             thread = threading.Thread(
                 target=app._process_worker,
                 args=(str(encrypted), str(tmp_path / "dec.csv"), WRONG_KEY, "decrypt",
-                      list(COLUMNS)),
+                      list(COLUMNS), {}),
                 daemon=True,
             )
             thread.start()
@@ -607,9 +619,9 @@ def test_columns_load_off_the_main_thread(tmp_path, monkeypatch):
         assert worker_threads and worker_threads[0] is not threading.main_thread()
 
         assert app.headers == HEADERS
-        assert list(app.columns_list.get(0, tk.END)) == HEADERS
+        assert _tree_headers(app) == HEADERS
         # Sensitive columns pre-selected, ID left alone.
-        assert set(app.columns_list.curselection()) == {1, 2, 3}
+        assert _active(app) == {1, 2, 3}
         assert _state(app) == "normal"
     finally:
         _close(app)
@@ -642,7 +654,7 @@ def test_unreadable_file_reports_an_error_and_clears_the_columns(tmp_path, monke
         assert [d[0] for d in dialogs] == ["error"]
         assert "Could not read CSV" in dialogs[0][2]
         assert app.headers == []
-        assert list(app.columns_list.get(0, tk.END)) == []
+        assert _tree_headers(app) == []
         assert _state(app) == "normal"
     finally:
         _close(app)
@@ -699,5 +711,267 @@ def test_already_encrypted_input_gets_its_own_message(tmp_path, monkeypatch):
         assert "already been encrypted" in dialogs[0][2]
         assert "Details were written to" not in dialogs[0][2]
         assert _state(app) == "normal"
+    finally:
+        _close(app)
+
+
+# -- per-column treatment --------------------------------------------------
+#
+# The column list is a three-state control (Skip / Scan / Whole cell) rather
+# than a tick list. The defaults reproduce exactly what the tick list used to
+# pre-select, so a user who touches nothing gets the behaviour they had
+# before; the two non-default states are what is new.
+
+
+def test_defaults_reproduce_the_old_preselection(tmp_path, monkeypatch):
+    """The regression that matters most. Sensitive whole-cell headers start
+    on Whole cell, sensitive scanned headers on Scan, everything else Skip -
+    which is precisely the old tick-list default expressed in three states."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(["ID", "Full Name", "E-Mail", "Notes", "Widget count"])
+
+        assert app.column_treatments() == {
+            0: gui.SKIP,    # not sensitive
+            1: gui.WHOLE,   # name -> whole-cell category
+            2: gui.SCAN,    # sensitive, but scanned
+            3: gui.SKIP,    # free text, not sensitive by header
+            4: gui.SKIP,
+        }
+    finally:
+        _close(app)
+
+
+def test_clicking_cycles_through_all_three_states(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(list(HEADERS))
+        app.set_column_treatment(0, gui.SKIP)
+
+        seen = []
+        for _ in range(4):
+            app.cycle_column_treatment(0)
+            seen.append(app.column_treatments()[0])
+
+        assert seen == [gui.SCAN, gui.WHOLE, gui.SKIP, gui.SCAN]
+    finally:
+        _close(app)
+
+
+def test_the_displayed_label_follows_the_treatment(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(list(HEADERS))
+        for treatment in (gui.SKIP, gui.SCAN, gui.WHOLE):
+            app.set_column_treatment(1, treatment)
+            assert _tree_rows(app)[1] == ("Full Name", gui.TREATMENT_LABELS[treatment])
+    finally:
+        _close(app)
+
+
+def test_decrypt_mode_collapses_the_two_encrypted_states(tmp_path, monkeypatch):
+    """Decryption infers treatment from cell content, so Scan and Whole cell
+    do the same thing there. Offering the choice would be asking the user a
+    question with no consequence, so the control becomes a two-state toggle
+    and both encrypted states read "Decrypt"."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(list(HEADERS))
+        app.mode.set("decrypt")
+        app._on_mode_change()
+
+        app.set_column_treatment(1, gui.WHOLE)
+        assert _tree_rows(app)[1] == ("Full Name", "Decrypt")
+        app.set_column_treatment(1, gui.SCAN)
+        assert _tree_rows(app)[1] == ("Full Name", "Decrypt")
+
+        app.set_column_treatment(1, gui.SKIP)
+        app.cycle_column_treatment(1)
+        assert app.column_treatments()[1] == gui.SCAN
+        app.cycle_column_treatment(1)
+        assert app.column_treatments()[1] == gui.SKIP  # not WHOLE
+    finally:
+        _close(app)
+
+
+def test_treatments_survive_a_mode_switch(tmp_path, monkeypatch):
+    """Flipping to Decrypt and back must not quietly rewrite a Whole cell
+    choice into something else - the mode changes the labels and the cycle,
+    never the stored treatment."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(list(HEADERS))
+        app.set_column_treatment(1, gui.WHOLE)
+        app.set_column_treatment(2, gui.SCAN)
+        before = app.column_treatments()
+
+        for mode in ("decrypt", "encrypt"):
+            app.mode.set(mode)
+            app._on_mode_change()
+
+        assert app.column_treatments() == before
+        assert _tree_rows(app)[1] == ("Full Name", gui.TREATMENT_LABELS[gui.WHOLE])
+    finally:
+        _close(app)
+
+
+def test_a_new_file_resets_the_treatments(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(list(HEADERS))
+        app.set_column_treatment(1, gui.SKIP)
+        app.set_column_treatment(0, gui.WHOLE)
+
+        app._populate_columns(["ID", "Full Name"])
+
+        assert app.column_treatments() == {0: gui.SKIP, 1: gui.WHOLE}
+        assert _tree_headers(app) == ["ID", "Full Name"]
+    finally:
+        _close(app)
+
+
+def test_keyboard_and_mouse_both_cycle(tmp_path, monkeypatch):
+    """The Treeview must not be mouse-only: the app is used on locked-down
+    machines where a keyboard path matters.
+
+    The handlers are driven directly rather than through event_generate.
+    Tk will not deliver key events to a withdrawn toplevel, and these tests
+    deliberately never map a window - so the binding being wired and the
+    handler being correct are asserted separately.
+    """
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(list(HEADERS))
+        tree = app.columns_tree
+
+        # Wired up at all.
+        for sequence in ("<space>", "<Return>", "<Button-1>"):
+            assert tree.bind(sequence), f"{sequence} is not bound"
+
+        # Keyboard: acts on the focused row.
+        app.set_column_treatment(1, gui.SKIP)
+        tree.focus("1")
+        app._on_tree_key(None)
+        assert app.column_treatments()[1] == gui.SCAN
+        app._on_tree_key(None)
+        assert app.column_treatments()[1] == gui.WHOLE
+
+        # Mouse: acts on the row under the pointer, not the focused one.
+        # bbox() needs a mapped window; identify_row() does not.
+        y = next((y for y in range(400) if tree.identify_row(y) == "2"), None)
+        assert y is not None, "Treeview never reports row 2 under the pointer"
+        app.set_column_treatment(2, gui.SKIP)
+        app._on_tree_click(types.SimpleNamespace(x=5, y=y))
+        assert app.column_treatments()[2] == gui.SCAN
+        assert app.column_treatments()[1] == gui.WHOLE  # focused row untouched
+    finally:
+        _close(app)
+
+
+def test_a_click_outside_any_row_changes_nothing(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._populate_columns(list(HEADERS))
+        before = app.column_treatments()
+        app._on_tree_click(types.SimpleNamespace(x=5, y=5000))
+        assert app.column_treatments() == before
+    finally:
+        _close(app)
+
+
+def test_run_passes_treatments_through_to_process_csv(tmp_path, monkeypatch):
+    """The seam between the control and the backend: Skip columns are not
+    selected at all, and the other two map onto whole_cell_overrides."""
+    captured = {}
+
+    def _fake(input_path, output_path, key, mode, selected, **kwargs):
+        captured["selected"] = list(selected)
+        captured["overrides"] = kwargs.get("whole_cell_overrides")
+
+    app, _ = _make_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(gui, "process_csv", _fake)
+    try:
+        input_path = tmp_path / "in.csv"
+        _write_csv(input_path, 3)
+        _configure(app, input_path, tmp_path / "out.csv")
+        app.set_column_treatment(0, gui.SKIP)
+        app.set_column_treatment(1, gui.WHOLE)
+        app.set_column_treatment(2, gui.SCAN)
+        app.set_column_treatment(3, gui.SKIP)
+
+        app._run()
+        _pump(app, lambda: not app._run_active, "the run to finish")
+
+        assert captured["selected"] == [1, 2]
+        assert captured["overrides"] == {1: True, 2: False}
+    finally:
+        _close(app)
+
+
+def test_all_skip_still_asks_for_confirmation(tmp_path, monkeypatch):
+    app, dialogs = _make_app(tmp_path, monkeypatch, askyesno=False)
+    try:
+        input_path = tmp_path / "in.csv"
+        _write_csv(input_path, 3)
+        _configure(app, input_path, tmp_path / "out.csv", columns=())
+
+        app._run()
+
+        assert [d[0] for d in dialogs] == ["askyesno"]
+        assert "nothing will be changed" in dialogs[0][2]
+        assert app._run_active is False
+    finally:
+        _close(app)
+
+
+def test_forcing_whole_cell_end_to_end(tmp_path, monkeypatch):
+    """The feature working for real, through the GUI and back: a free-text
+    column the heuristic would scan is encrypted whole instead, and still
+    decrypts without the user having to say so again."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        input_path = tmp_path / "in.csv"
+        encrypted = tmp_path / "enc.csv"
+        with open(input_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["ID", "Notes"])
+            writer.writerow(["1", "spoke to lilly petlock about the referral"])
+
+        _configure(app, input_path, encrypted)
+        app._populate_columns(["ID", "Notes"])
+        app.set_column_treatment(0, gui.SKIP)
+        app.set_column_treatment(1, gui.WHOLE)
+        app._run()
+        _pump(app, lambda: not app._run_active, "the encrypt to finish")
+
+        cell = _read_csv(encrypted)[1][1]
+        assert looks_like_token(cell)          # whole cell, not spans
+        assert "petlock" not in cell           # what the scanner would miss
+
+        decrypted = tmp_path / "dec.csv"
+        _configure(app, encrypted, decrypted, mode="decrypt")
+        app._populate_columns(["ID", "Notes"])
+        app.set_column_treatment(1, gui.SCAN)  # deliberately the "wrong" one
+        app._run()
+        _pump(app, lambda: not app._run_active, "the decrypt to finish")
+
+        assert _read_csv(decrypted) == _read_csv(input_path)
+    finally:
+        _close(app)
+
+
+def test_a_wide_file_does_not_stall_the_event_loop(tmp_path, monkeypatch):
+    """A Treeview row is heavier than a Listbox line. Populating a few
+    hundred columns has to stay well inside a frame, or picking a wide file
+    reintroduces exactly the freeze this whole branch removed."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        headers = [f"Column {i}" for i in range(500)]
+        start = time.monotonic()
+        app._populate_columns(headers)
+        elapsed = time.monotonic() - start
+
+        assert len(app.column_treatments()) == 500
+        assert elapsed < 1.0, f"populating 500 columns took {elapsed:.2f}s"
     finally:
         _close(app)

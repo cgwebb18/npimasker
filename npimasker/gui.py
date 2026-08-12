@@ -18,9 +18,31 @@ from npimasker.crypto import (
 )
 from npimasker.csv_processor import process_csv, read_headers
 from npimasker.logging_setup import setup_logging
-from npimasker.sensitive_fields import detect_sensitive_columns
+from npimasker.sensitive_fields import detect_sensitive_columns, is_whole_cell_header
 
 logger = logging.getLogger(__name__)
+
+# How a column is treated. The old control was a tick list, which could only
+# say "process this column" and left the how to the header heuristic. Three
+# states let the user say it directly - which matters both for correctness
+# (a wholly-sensitive free-text column is safer encrypted whole than
+# partially scanned) and for speed (scanning is where all the runtime goes).
+SKIP = "skip"
+SCAN = "scan"
+WHOLE = "whole"
+
+TREATMENT_LABELS = {
+    SKIP: "Skip",
+    SCAN: "Scan for sensitive text",
+    WHOLE: "Encrypt whole cell",
+}
+
+# Decryption infers each cell's treatment from its content, so Scan and
+# Whole cell do exactly the same thing there. Showing the distinction would
+# be asking the user a question with no consequence.
+DECRYPT_LABELS = {SKIP: "Skip", SCAN: "Decrypt", WHOLE: "Decrypt"}
+
+_CYCLE = (SKIP, SCAN, WHOLE)
 
 
 class App(tk.Tk):
@@ -35,6 +57,7 @@ class App(tk.Tk):
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.headers: list[str] = []
+        self._treatments: dict[int, str] = {}
         self._progress_queue = None
         self._header_queue = None
         self._run_active = False
@@ -89,15 +112,27 @@ class App(tk.Tk):
         cols_frame.pack(fill="both", expand=True, **pad)
         ttk.Label(
             cols_frame,
-            text="Columns to scan for sensitive data (sensitive-looking ones are pre-selected):",
+            text="Columns (click a row, or press Space, to change how it is treated):",
         ).pack(anchor="w")
         list_row = ttk.Frame(cols_frame)
         list_row.pack(fill="both", expand=True)
-        self.columns_list = tk.Listbox(list_row, selectmode=tk.MULTIPLE, exportselection=False)
-        self.columns_list.pack(side="left", fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(list_row, orient="vertical", command=self.columns_list.yview)
+        self.columns_tree = ttk.Treeview(
+            list_row, columns=("column", "treatment"), show="headings", selectmode="browse"
+        )
+        self.columns_tree.heading("column", text="Column")
+        self.columns_tree.heading("treatment", text="Treatment")
+        self.columns_tree.column("column", width=240, anchor="w")
+        self.columns_tree.column("treatment", width=180, anchor="w")
+        self.columns_tree.pack(side="left", fill="both", expand=True)
+        # Mouse and keyboard both cycle: the app is used on locked-down
+        # machines, and a mouse-only three-state control would be unusable
+        # for anyone driving it from the keyboard.
+        self.columns_tree.bind("<Button-1>", self._on_tree_click)
+        self.columns_tree.bind("<space>", self._on_tree_key)
+        self.columns_tree.bind("<Return>", self._on_tree_key)
+        scrollbar = ttk.Scrollbar(list_row, orient="vertical", command=self.columns_tree.yview)
         scrollbar.pack(side="left", fill="y")
-        self.columns_list.config(yscrollcommand=scrollbar.set)
+        self.columns_tree.config(yscrollcommand=scrollbar.set)
 
         key_frame = ttk.Frame(self)
         key_frame.pack(fill="x", **pad)
@@ -137,6 +172,7 @@ class App(tk.Tk):
 
     def _on_mode_change(self):
         self._suggest_output_path()
+        self._refresh_all_rows()
 
     def _browse_input(self):
         path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
@@ -195,13 +231,76 @@ class App(tk.Tk):
         self.status_var.set("Reading columns..." if loading else "")
 
     def _populate_columns(self, headers: list[str]):
+        """Rebuild the column list, seeding each row's default treatment.
+
+        The defaults are exactly what the old tick list pre-selected,
+        expressed in three states: a sensitive header is ticked, and the
+        header heuristic already decided whether it would then be encrypted
+        whole or scanned. A user who touches nothing gets what they had.
+        """
         self.headers = headers
-        self.columns_list.delete(0, tk.END)
+        self.columns_tree.delete(*self.columns_tree.get_children(""))
         sensitive = set(detect_sensitive_columns(self.headers))
+        self._treatments = {}
         for i, header in enumerate(self.headers):
-            self.columns_list.insert(tk.END, header)
-            if i in sensitive:
-                self.columns_list.selection_set(i)
+            if i not in sensitive:
+                treatment = SKIP
+            else:
+                treatment = WHOLE if is_whole_cell_header(header) else SCAN
+            self._treatments[i] = treatment
+            self.columns_tree.insert(
+                "", tk.END, iid=str(i), values=(header, self._label(treatment))
+            )
+
+    # -- Column treatments -------------------------------------------------
+
+    def _label(self, treatment: str) -> str:
+        labels = DECRYPT_LABELS if self.mode.get() == "decrypt" else TREATMENT_LABELS
+        return labels[treatment]
+
+    def column_treatments(self) -> dict[int, str]:
+        """The chosen treatment for every column, by index."""
+        return dict(self._treatments)
+
+    def set_column_treatment(self, index: int, treatment: str):
+        self._treatments[index] = treatment
+        self._refresh_row(index)
+
+    def cycle_column_treatment(self, index: int):
+        """Advance one row to its next state.
+
+        In decrypt mode this is a two-state toggle, because Scan and Whole
+        cell are indistinguishable there - cycling through both would show
+        the label not changing and read as a broken control. The stored
+        treatment is never rewritten on a mode change, only relabelled, so
+        a Whole cell choice survives a trip through Decrypt and back.
+        """
+        current = self._treatments.get(index, SKIP)
+        if self.mode.get() == "decrypt":
+            self._treatments[index] = SCAN if current == SKIP else SKIP
+        else:
+            self._treatments[index] = _CYCLE[(_CYCLE.index(current) + 1) % len(_CYCLE)]
+        self._refresh_row(index)
+
+    def _refresh_row(self, index: int):
+        iid = str(index)
+        if self.columns_tree.exists(iid):
+            self.columns_tree.set(iid, "treatment", self._label(self._treatments[index]))
+
+    def _refresh_all_rows(self):
+        for index in self._treatments:
+            self._refresh_row(index)
+
+    def _on_tree_click(self, event):
+        row = self.columns_tree.identify_row(event.y)
+        if row:
+            self.cycle_column_treatment(int(row))
+
+    def _on_tree_key(self, _event):
+        row = self.columns_tree.focus()
+        if row:
+            self.cycle_column_treatment(int(row))
+        return "break"  # Space would otherwise also scroll the Treeview
 
     def _suggest_output_path(self):
         input_path = self.input_path.get()
@@ -275,7 +374,11 @@ class App(tk.Tk):
         input_path = self.input_path.get()
         output_path = self.output_path.get()
         passphrase = self.key_entry.get()
-        selected = list(self.columns_list.curselection())
+        # Skip means "don't select it at all"; the other two become the
+        # explicit whole-cell override, so the backend never has to re-guess
+        # from the header what the user already told us.
+        selected = sorted(i for i, t in self._treatments.items() if t != SKIP)
+        overrides = {i: self._treatments[i] == WHOLE for i in selected}
         mode = self.mode.get()
 
         if self._loading_columns:
@@ -294,7 +397,9 @@ class App(tk.Tk):
             return
         if not selected:
             if not messagebox.askyesno(
-                "NPIMasker", "No columns are selected, so nothing will be changed. Continue anyway?"
+                "NPIMasker",
+                "Every column is set to Skip, so nothing will be changed. "
+                "Continue anyway?",
             ):
                 return
 
@@ -306,13 +411,13 @@ class App(tk.Tk):
 
         thread = threading.Thread(
             target=self._process_worker,
-            args=(input_path, output_path, key, mode, selected),
+            args=(input_path, output_path, key, mode, selected, overrides),
             daemon=True,
         )
         thread.start()
         self.after(100, self._poll_progress, output_path, mode)
 
-    def _process_worker(self, input_path, output_path, key, mode, selected):
+    def _process_worker(self, input_path, output_path, key, mode, selected, overrides):
         """Runs on a background thread so the Tk event loop keeps pumping
         messages during long CSV runs, instead of Windows showing the app
         as unresponsive for the whole run."""
@@ -323,6 +428,7 @@ class App(tk.Tk):
                 key,
                 mode,
                 selected,
+                whole_cell_overrides=overrides,
                 progress_callback=lambda row: self._progress_queue.put(("progress", row)),
             )
         except Exception as exc:  # surface everything: a windowed app has no stderr

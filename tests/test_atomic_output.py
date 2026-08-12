@@ -193,9 +193,13 @@ def test_late_failure_in_large_file_leaves_no_output(tmp_path):
     encrypted_path = _make_encrypted_csv(work_dir, name="encrypted.csv", rows=rows)
 
     # Corrupt one late cell so ~1900 rows decrypt cleanly before the error.
+    # Truncating a real token rather than substituting arbitrary text:
+    # decryption infers a cell's treatment from its content, so a value
+    # bearing no resemblance to a token is (correctly) read as plaintext
+    # and passed through. Truncation is also the realistic corruption.
     enc_rows = _read_csv(encrypted_path)
     assert len(enc_rows) == 2001
-    enc_rows[1900][1] = "definitely-not-a-fernet-token"
+    enc_rows[1900][1] = enc_rows[1900][1][:80]
     _write_csv(encrypted_path, enc_rows[0], enc_rows[1:])
 
     output_path = work_dir / "out.csv"
