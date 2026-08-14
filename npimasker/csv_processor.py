@@ -294,6 +294,11 @@ def _atomic_output(output_path: str, info: EncodingInfo | None = None):
         yield handle
         handle.close()  # flushes the encoder; may raise UnicodeEncodeError
         handle = None
+        if not info.final_newline:
+            # A modified last record went through csv.writer, which
+            # terminates every row. An unmodified one was written verbatim
+            # and already lacks the terminator, so this is a no-op there.
+            _strip_final_newline(temp_path, info)
         os.replace(temp_path, output_path)
         temp_path = None  # ownership handed to output_path
     finally:
@@ -308,6 +313,52 @@ def _atomic_output(output_path: str, info: EncodingInfo | None = None):
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+def _records_with_source(stream):
+    """Yield (fields, source_text) for each CSV record.
+
+    csv.reader pulls one line at a time from its iterator and yields as
+    soon as a record is complete, so whatever the tee collected is exactly
+    that record's text - including the extra physical lines of a field
+    with an embedded newline, and including the record's own terminator
+    (the stream is opened with newline="", so nothing is translated).
+
+    Having the original text is what lets untouched records be written
+    back verbatim instead of re-serialised. csv.writer emits what the
+    dialect says rather than what the file said: it drops quotes the file
+    didn't need, and terminates every row whether or not the last one was
+    terminated.
+    """
+    collected: list[str] = []
+
+    def _tee():
+        for line in stream:
+            collected.append(line)
+            yield line
+
+    for fields in csv.reader(_tee()):
+        source = "".join(collected)
+        collected.clear()
+        yield fields, source
+
+
+def _strip_final_newline(path: str, info: EncodingInfo) -> None:
+    """Undo the terminator csv.writer added to a file that had none.
+
+    Encoded, not a fixed byte count: in UTF-16 a terminator is two bytes
+    per character, and lopping off the wrong number would corrupt the
+    final character rather than remove the newline.
+    """
+    suffix = info.newline.encode(info.write_codec)
+    size = os.path.getsize(path)
+    if size < len(suffix):
+        return
+    with open(path, "rb+") as f:
+        f.seek(size - len(suffix))
+        if f.read() != suffix:
+            return
+        f.truncate(size - len(suffix))
 
 
 def read_headers(input_path: str) -> list[str]:
@@ -422,13 +473,14 @@ def process_csv(
     with _atomic_output(output_path, info) as outfile, open(
         input_path, newline="", encoding=info.read_codec
     ) as infile:
-        reader = csv.reader(infile)
+        reader = _records_with_source(infile)
         writer = csv.writer(outfile, lineterminator=info.newline)
 
-        headers = next(reader, None)
-        if headers is None:
+        first = next(reader, None)
+        if first is None:
             raise ValueError("Input CSV is empty.")
-        writer.writerow(headers)
+        headers, header_source = first
+        outfile.write(header_source)
 
         overrides = whole_cell_overrides or {}
         whole_cell = {
@@ -461,7 +513,7 @@ def process_csv(
             if mode == "encrypt" and scanned:
                 cells = [
                     (position, idx)
-                    for position, (_, row) in enumerate(buffered)
+                    for position, (_, row, _source) in enumerate(buffered)
                     for idx in scanned
                     if idx < len(row) and row[idx]
                 ]
@@ -480,24 +532,35 @@ def process_csv(
                     )
                     precomputed = dict(zip(cells, spans))
 
-            for position, (number, row) in enumerate(buffered):
+            for position, (number, row, source) in enumerate(buffered):
+                changed = False
                 for idx in selected:
                     if idx >= len(row):
                         continue
                     try:
                         spans = precomputed.get((position, idx))
                         if spans is None:
-                            row[idx] = _transform_cell(
+                            new_value = _transform_cell(
                                 row[idx], key, mode, whole_cell.get(idx, True)
                             )
                         else:
-                            row[idx] = encrypt_text_spans(row[idx], spans, key)
+                            new_value = encrypt_text_spans(row[idx], spans, key)
                     except WrongKeyError as exc:
                         column_name = headers[idx] if idx < len(headers) else str(idx)
                         raise WrongKeyError(
                             f"{exc} (row {number}, column '{column_name}')"
                         ) from exc
-                writer.writerow(row)
+                    changed = changed or new_value != row[idx]
+                    row[idx] = new_value
+
+                # Only records we actually altered go through the writer.
+                # Everything else is written back exactly as it arrived,
+                # which is the only way to keep quoting, spacing and the
+                # line terminator the file chose.
+                if changed:
+                    writer.writerow(row)
+                else:
+                    outfile.write(source)
 
                 rows_done = number - 1
                 now = time.monotonic()
@@ -513,8 +576,8 @@ def process_csv(
                         progress_callback(rows_done)
 
         buffered = []
-        for row_num, row in enumerate(reader, start=2):
-            buffered.append((row_num, list(row)))
+        for row_num, (row, source) in enumerate(reader, start=2):
+            buffered.append((row_num, list(row), source))
             if len(buffered) >= _BATCH_ROWS:
                 _flush(buffered)
                 buffered = []
