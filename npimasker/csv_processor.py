@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 _PROGRESS_INTERVAL_ROWS = 500
 _PROGRESS_INTERVAL_SECONDS = 2.0
 
+# Verification is much cheaper per row than processing, so it needs a
+# coarser row trigger to avoid flooding the queue, and a shorter time one
+# so a slow disk still shows movement.
+_VERIFY_INTERVAL_ROWS = 5_000
+_VERIFY_INTERVAL_SECONDS = 0.5
+
 # Rows buffered before flushing, so scanned cells batch through the NER
 # model together. Small enough that progress still ticks regularly:
 # nothing is reported until a chunk finishes.
@@ -59,6 +65,22 @@ def _decodes_cleanly(input_path: str, encoding: str) -> bool:
     except UnicodeDecodeError:
         return False
     return True
+
+
+@dataclass(frozen=True)
+class ProgressUpdate:
+    """One progress report from a running job.
+
+    `fraction` is driven by input bytes consumed, not rows: rows would
+    need a counting pass over the whole file first, whereas the byte
+    offset is already there for free. It runs slightly ahead of the work
+    actually done, by at most one read buffer, which is nothing on the
+    60 MB files this exists for.
+    """
+
+    rows: int
+    fraction: float
+    phase: str  # "processing" | "verifying"
 
 
 class UnsupportedEncodingError(ValueError):
@@ -336,6 +358,7 @@ def _verify_output(
     mode: str,
     selected: set[int],
     info: EncodingInfo,
+    progress_callback=None,
 ) -> None:
     """Read the finished file back and prove it against the input.
 
@@ -351,13 +374,30 @@ def _verify_output(
     check, which catches the failure mode where a value was silently not
     decrypted at all.
     """
-    with open(input_path, newline="", encoding=info.read_codec) as fin, open(
-        output_path, newline="", encoding=info.read_codec
-    ) as fout:
+    total = os.path.getsize(input_path)
+    raw_in = open(input_path, "rb")
+    fin = io.TextIOWrapper(raw_in, encoding=info.read_codec, newline="")
+    with fin, open(output_path, newline="", encoding=info.read_codec) as fout:
         rows_in, rows_out = csv.reader(fin), csv.reader(fout)
         headers: list[str] = []
+        reported_at = time.monotonic()
+        reported_rows = 0
 
         for number, (src, out) in enumerate(zip_longest(rows_in, rows_out), start=1):
+            # Rows as well as time: verification is fast enough that a
+            # purely time-based trigger reports nothing at all on a file
+            # big enough to be worth showing a bar for.
+            now = time.monotonic()
+            if progress_callback is not None and (
+                number - reported_rows >= _VERIFY_INTERVAL_ROWS
+                or now - reported_at >= _VERIFY_INTERVAL_SECONDS
+            ):
+                reported_at, reported_rows = now, number
+                progress_callback(ProgressUpdate(
+                    rows=max(0, number - 1),
+                    fraction=min(1.0, raw_in.tell() / total) if total else 1.0,
+                    phase="verifying",
+                ))
             if src is None:
                 raise VerificationError(
                     f"The output has more rows than the input (at row {number})."
@@ -578,12 +618,19 @@ def process_csv(
         if not verify:
             return
         checked = time.monotonic()
-        _verify_output(input_path, temp_path, key, mode, selected, info)
+        _verify_output(
+            input_path, temp_path, key, mode, selected, info,
+            progress_callback=progress_callback,
+        )
         logger.info("process_csv verified in %.1fs", time.monotonic() - checked)
 
-    with _atomic_output(output_path, info, before_commit=_check) as outfile, open(
-        input_path, newline="", encoding=info.read_codec
-    ) as infile:
+    # Read through a binary handle so progress can use the byte offset: a
+    # text stream refuses tell() while it is being iterated, and counting
+    # rows would need a whole extra pass over the file first.
+    total_bytes = os.path.getsize(input_path)
+    raw_in = open(input_path, "rb")
+    infile = io.TextIOWrapper(raw_in, encoding=info.read_codec, newline="")
+    with _atomic_output(output_path, info, before_commit=_check) as outfile, infile:
         reader = _records_with_source(infile)
         writer = csv.writer(outfile, lineterminator=info.newline)
 
@@ -684,7 +731,14 @@ def process_csv(
                         "process_csv progress: rows=%d, elapsed=%.1fs", rows_done, now - start
                     )
                     if progress_callback is not None:
-                        progress_callback(rows_done)
+                        progress_callback(ProgressUpdate(
+                            rows=rows_done,
+                            fraction=(
+                                min(1.0, raw_in.tell() / total_bytes)
+                                if total_bytes else 1.0
+                            ),
+                            phase="processing",
+                        ))
 
         buffered = []
         for row_num, (row, source) in enumerate(reader, start=2):
