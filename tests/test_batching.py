@@ -124,7 +124,7 @@ def test_progress_still_reports_across_chunk_boundaries(tmp_path, monkeypatch):
     seen = []
     process_csv(
         str(src), str(tmp_path / "out.csv"), KEY, "encrypt", [1],
-        progress_callback=seen.append,
+        progress_callback=lambda u: seen.append(u.rows),
         progress_interval_rows=10,
         progress_interval_seconds=10_000,
     )

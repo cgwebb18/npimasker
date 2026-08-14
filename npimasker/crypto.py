@@ -108,6 +108,19 @@ def looks_like_damaged_token(value: str) -> bool:
     return value.startswith(_TOKEN_PREFIX) and not looks_like_token(value)
 
 
+def contains_decryptable_marker(text: str) -> bool:
+    """Whether text holds a marker whose payload is a real Fernet token.
+
+    Stricter than contains_marker, and used to answer a different
+    question: not "would the decrypter touch this?" but "is there still
+    something here that a decrypt should have turned back into
+    plaintext?". Plaintext is allowed to contain marker-shaped junk -
+    "[[ENC:notarealtoken]]" survives a round trip untouched and must not
+    be reported as an incomplete decryption.
+    """
+    return any(looks_like_token(payload) for payload in _MARKER_RE.findall(text))
+
+
 def generate_passphrase() -> str:
     """Generate a strong random key string for the user to save."""
     return secrets.token_urlsafe(32)

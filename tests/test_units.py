@@ -512,7 +512,14 @@ def test_embedded_commas_quotes_and_newlines_survive_a_round_trip(tmp_path):
     assert _read_csv(decrypted_path) == rows
 
 
-def test_output_is_written_as_utf8_whatever_the_input_encoding(tmp_path):
+def test_output_is_written_in_the_input_encoding(tmp_path):
+    """Deliberate reversal of the old behaviour.
+
+    Output used to be UTF-8 whatever came in, which meant a cp1252 export
+    round-tripped into a file Excel reopens as mojibake - the tool
+    silently altering data it was told to leave alone. It now comes back
+    in the encoding it arrived in.
+    """
     input_path = tmp_path / "in.csv"
     output_path = tmp_path / "out.csv"
     # cp1252 source: 0xb7 middot and 0xe9 e-acute in an *unselected* column.
@@ -521,12 +528,13 @@ def test_output_is_written_as_utf8_whatever_the_input_encoding(tmp_path):
 
     process_csv(str(input_path), str(output_path), KEY, "encrypt", [1])
 
-    # Reads cleanly as utf-8 (a cp1252 re-encode would raise here).
-    rows = _read_csv(output_path, encoding="utf-8")
+    rows = _read_csv(output_path, encoding="cp1252")
     assert rows[0] == ["Notes", "Full Name"]
     assert rows[1][0] == "café · visit"
     assert decrypt_value(rows[1][1], KEY) == "Jane Doe"
-    assert detect_csv_encoding(str(output_path)) == "utf-8-sig"
+    assert detect_csv_encoding(str(output_path)) == "cp1252"
+    # The untouched column is byte-identical, not transcoded.
+    assert b"caf\xe9 \xb7 visit" in output_path.read_bytes()
 
 
 def test_unicode_cells_survive_a_whole_cell_round_trip_through_csv(tmp_path):

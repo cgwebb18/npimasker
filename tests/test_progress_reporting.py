@@ -72,7 +72,7 @@ def test_progress_callback_is_invoked_on_a_large_file(tmp_path):
         KEY,
         "encrypt",
         NAME_COLUMN,
-        progress_callback=calls.append,
+        progress_callback=lambda u: calls.append(u.rows),
     )
 
     assert calls, "a 1000-row file must report progress at least once"
@@ -88,7 +88,7 @@ def test_progress_reports_data_row_counts_at_the_default_interval(tmp_path):
         KEY,
         "encrypt",
         NAME_COLUMN,
-        progress_callback=calls.append,
+        progress_callback=lambda u: calls.append(u.rows),
     )
 
     # Data rows, header excluded: the 500th and the 1000th.
@@ -107,7 +107,7 @@ def test_progress_never_reports_more_rows_than_the_file_contains(tmp_path):
         KEY,
         "encrypt",
         NAME_COLUMN,
-        progress_callback=calls.append,
+        progress_callback=lambda u: calls.append(u.rows),
     )
 
     data_rows = _count_data_rows(input_path)
@@ -127,7 +127,7 @@ def test_zero_second_interval_reports_every_row_on_a_small_file(tmp_path):
         KEY,
         "encrypt",
         NAME_COLUMN,
-        progress_callback=calls.append,
+        progress_callback=lambda u: calls.append(u.rows),
         progress_interval_seconds=0,
     )
 
@@ -144,7 +144,7 @@ def test_row_interval_still_triggers_when_the_time_trigger_cannot_fire(tmp_path)
         KEY,
         "encrypt",
         NAME_COLUMN,
-        progress_callback=calls.append,
+        progress_callback=lambda u: calls.append(u.rows),
         progress_interval_rows=100,
         progress_interval_seconds=10_000,
     )
@@ -162,7 +162,7 @@ def test_time_trigger_fires_independently_of_the_row_trigger(tmp_path):
         KEY,
         "encrypt",
         NAME_COLUMN,
-        progress_callback=calls.append,
+        progress_callback=lambda u: calls.append(u.rows),
         progress_interval_rows=10_000,  # never reached
         progress_interval_seconds=0,
     )
@@ -194,7 +194,7 @@ def test_reported_progress_values_strictly_increase(tmp_path):
         KEY,
         "encrypt",
         NAME_COLUMN,
-        progress_callback=calls.append,
+        progress_callback=lambda u: calls.append(u.rows),
     )
 
     assert len(calls) >= 2
@@ -256,3 +256,73 @@ def test_spacy_model_load_logs_a_heartbeat_before_and_after(tmp_path, caplog, mo
     assert loading, messages
     assert loaded, messages
     assert loading[0] < loaded[0], messages
+
+
+# -- the fraction and phase carried alongside the row count ----------------
+#
+# A determinate progress bar needs a total. Counting rows would mean a whole
+# extra pass over the file before any work starts, so the fraction is driven
+# by input bytes consumed, which the reader already knows.
+
+
+def test_progress_reports_a_fraction_that_advances_to_completion(tmp_path):
+    calls = []
+    input_path = tmp_path / "in.csv"
+    _write_csv(input_path, 3000)
+
+    process_csv(
+        str(input_path), str(tmp_path / "out.csv"), KEY, "encrypt", [1],
+        progress_callback=calls.append,
+    )
+
+    fractions = [c.fraction for c in calls]
+    assert fractions, "expected at least one report"
+    assert all(0.0 <= f <= 1.0 for f in fractions), fractions
+    assert fractions == sorted(fractions), fractions
+    assert fractions[-1] > 0.5, fractions
+
+
+def test_progress_phase_is_processing_when_verification_is_off(tmp_path):
+    calls = []
+    input_path = tmp_path / "in.csv"
+    _write_csv(input_path, 1000)
+
+    process_csv(
+        str(input_path), str(tmp_path / "out.csv"), KEY, "encrypt", [1],
+        verify=False, progress_callback=calls.append,
+    )
+
+    assert {c.phase for c in calls} == {"processing"}
+
+
+def test_verification_reports_its_own_phase(tmp_path):
+    """Otherwise the bar sits at 100% for the whole verification pass and
+    the app looks hung - which is the failure this feature exists to fix."""
+    calls = []
+    input_path = tmp_path / "in.csv"
+    _write_csv(input_path, 40_000)
+
+    process_csv(
+        str(input_path), str(tmp_path / "out.csv"), KEY, "encrypt", [1],
+        verify=True, progress_callback=calls.append,
+    )
+
+    phases = [c.phase for c in calls]
+    assert "verifying" in phases, phases
+    # Verification runs after processing, never interleaved with it.
+    assert phases == sorted(phases, key=lambda p: p == "verifying"), phases
+
+
+def test_fraction_is_well_defined_for_an_empty_data_section(tmp_path):
+    """A header-only file has no rows to report, and must not divide by
+    zero or emit a fraction outside 0..1."""
+    input_path = tmp_path / "in.csv"
+    input_path.write_text("ID,Full Name\r\n", encoding="utf-8")
+    calls = []
+
+    process_csv(
+        str(input_path), str(tmp_path / "out.csv"), KEY, "encrypt", [1],
+        progress_callback=calls.append, progress_interval_seconds=0,
+    )
+
+    assert all(0.0 <= c.fraction <= 1.0 for c in calls)

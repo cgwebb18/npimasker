@@ -22,7 +22,7 @@ import pytest
 
 from npimasker import gui
 from npimasker.crypto import WrongKeyError, derive_key, looks_like_token
-from npimasker.csv_processor import process_csv
+from npimasker.csv_processor import ProgressUpdate, process_csv
 
 try:
     _probe = tk.Tk()
@@ -264,7 +264,9 @@ def test_ui_keeps_pumping_events_while_the_worker_runs(tmp_path, monkeypatch):
         assert ticks["n"] > 10, f"only {ticks['n']} after() callbacks during the run"
         # Progress was reported mid-run, i.e. the loop was live *while* the
         # worker was still going, not just after it finished.
-        assert any(s.startswith("Processing... ") and s.endswith(" rows") for s in statuses), statuses
+        assert any(
+            s.startswith("Processing... ") and s.endswith("%)") for s in statuses
+        ), statuses
         assert _state(app) == "normal"
         assert [d[0] for d in dialogs] == ["info"]
     finally:
@@ -440,8 +442,9 @@ def test_worker_only_emits_queue_messages_on_success(tmp_path, monkeypatch):
         assert not thread.is_alive(), "worker thread did not finish"
 
         assert recorded[-1] == ("done", None)
-        assert recorded[:-1] == [("progress", 500), ("progress", 1000)]
         assert all(kind == "progress" for kind, _ in recorded[:-1])
+        assert [u.rows for _, u in recorded[:-1]] == [500, 1000]
+        assert all(0.0 <= u.fraction <= 1.0 for _, u in recorded[:-1])
 
         # Nothing in the worker touched Tk: no widget state changed and no
         # dialog was raised from the background thread.
@@ -493,11 +496,13 @@ def test_progress_queue_messages_drive_the_status_line(tmp_path, monkeypatch):
     try:
         output_path = tmp_path / "out.csv"
         app._progress_queue = queue.Queue()
-        app._progress_queue.put(("progress", 500))
+        app._progress_queue.put(
+            ("progress", ProgressUpdate(rows=500, fraction=0.25, phase="processing"))
+        )
         app.run_button.config(state="disabled")
 
         app._poll_progress(str(output_path), "encrypt")
-        assert app.status_var.get() == "Processing... 500 rows"
+        assert app.status_var.get() == "Processing... 500 rows (25%)"
         assert _state(app) == "disabled"
         assert dialogs == []
 
@@ -975,3 +980,199 @@ def test_a_wide_file_does_not_stall_the_event_loop(tmp_path, monkeypatch):
         assert elapsed < 1.0, f"populating 500 columns took {elapsed:.2f}s"
     finally:
         _close(app)
+
+
+# -- progress bar, verify checkbox, tooltip --------------------------------
+
+
+def test_the_bar_advances_and_resets(tmp_path, monkeypatch):
+    app, dialogs = _make_app(tmp_path, monkeypatch)
+    try:
+        output_path = tmp_path / "out.csv"
+        app._progress_queue = queue.Queue()
+        assert app.progress_bar.cget("value") == 0
+
+        app._progress_queue.put(
+            ("progress", ProgressUpdate(rows=500, fraction=0.5, phase="processing"))
+        )
+        app._poll_progress(str(output_path), "encrypt")
+        assert app.progress_bar.cget("value") == gui._PROGRESS_SCALE // 2
+
+        # A finished run must not leave the bar full: done and failed have
+        # to look different, and the next run starts from zero.
+        app._progress_queue.put(("done", None))
+        app._poll_progress(str(output_path), "encrypt")
+        assert app.progress_bar.cget("value") == 0
+    finally:
+        _close(app)
+
+
+def test_the_bar_resets_after_a_failure_too(tmp_path, monkeypatch):
+    app, dialogs = _make_app(tmp_path, monkeypatch)
+    try:
+        app._progress_queue = queue.Queue()
+        app._progress_queue.put(
+            ("progress", ProgressUpdate(rows=10, fraction=0.9, phase="processing"))
+        )
+        app._poll_progress(str(tmp_path / "out.csv"), "encrypt")
+        app._progress_queue.put(("error", WrongKeyError("nope")))
+        app._poll_progress(str(tmp_path / "out.csv"), "encrypt")
+
+        assert app.progress_bar.cget("value") == 0
+        assert _state(app) == "normal"
+    finally:
+        _close(app)
+
+
+def test_the_verifying_phase_is_named_in_the_status_line(tmp_path, monkeypatch):
+    """Without this the bar sits near 100% through verification and the
+    app looks hung - the exact impression this feature exists to remove."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._progress_queue = queue.Queue()
+        app._progress_queue.put(
+            ("progress", ProgressUpdate(rows=900, fraction=0.6, phase="verifying"))
+        )
+        app._poll_progress(str(tmp_path / "out.csv"), "encrypt")
+        assert app.status_var.get() == "Verifying... 900 rows (60%)"
+    finally:
+        _close(app)
+
+
+def test_the_bar_is_indeterminate_while_headers_load(tmp_path, monkeypatch):
+    """Reading headers means sniffing the encoding, which has no total to
+    report - so the bar must animate rather than claim a percentage."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        app._set_loading_columns(True)
+        assert str(app.progress_bar.cget("mode")) == "indeterminate"
+        app._set_loading_columns(False)
+        assert str(app.progress_bar.cget("mode")) == "determinate"
+        assert app.progress_bar.cget("value") == 0
+    finally:
+        _close(app)
+
+
+# -- the verify checkbox ---------------------------------------------------
+
+
+def test_verification_is_off_by_default(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        assert app.verify_var.get() is False
+    finally:
+        _close(app)
+
+
+@pytest.mark.parametrize("checked", [False, True])
+def test_the_checkbox_reaches_process_csv(tmp_path, monkeypatch, checked):
+    captured = {}
+
+    def _fake(input_path, output_path, key, mode, selected, **kwargs):
+        captured["verify"] = kwargs.get("verify")
+
+    app, _ = _make_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(gui, "process_csv", _fake)
+    try:
+        input_path = tmp_path / "in.csv"
+        _write_csv(input_path, 3)
+        _configure(app, input_path, tmp_path / "out.csv")
+        app.verify_var.set(checked)
+
+        app._run()
+        _pump(app, lambda: not app._run_active, "the run to finish")
+
+        assert captured["verify"] is checked
+    finally:
+        _close(app)
+
+
+def test_verification_failure_surfaces_as_an_error(tmp_path, monkeypatch):
+    """A verification failure has to reach the user as a dialog, not vanish
+    into a background thread - and no output may be left behind."""
+    from npimasker.csv_processor import VerificationError
+
+    def _fake(*args, **kwargs):
+        raise VerificationError("Row 7, column 'Full Name' does not decrypt back.")
+
+    app, dialogs = _make_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(gui, "process_csv", _fake)
+    try:
+        input_path = tmp_path / "in.csv"
+        _write_csv(input_path, 3)
+        _configure(app, input_path, tmp_path / "out.csv")
+        app.verify_var.set(True)
+
+        app._run()
+        _pump(app, lambda: not app._run_active, "the run to fail")
+
+        assert [d[0] for d in dialogs] == ["error"]
+        assert "Row 7" in dialogs[0][2]
+        assert not (tmp_path / "out.csv").exists()
+        assert app.progress_bar.cget("value") == 0
+    finally:
+        _close(app)
+
+
+# -- the tooltip -----------------------------------------------------------
+
+
+def test_the_checkbox_has_a_tooltip_explaining_the_trade(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        text = app.verify_tooltip.text
+        assert "decrypts back" in text        # what it checks
+        assert "no file is written" in text   # what happens on failure
+        assert "doubles" in text              # what it costs
+    finally:
+        _close(app)
+
+
+def test_the_tooltip_is_bound_to_hover(tmp_path, monkeypatch):
+    """Tk will not deliver synthetic enter/leave to a withdrawn toplevel
+    and these tests never map a window, so the binding and the handler are
+    asserted separately."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        for sequence in ("<Enter>", "<Leave>"):
+            assert app.verify_check.bind(sequence), f"{sequence} is not bound"
+    finally:
+        _close(app)
+
+
+def test_the_tooltip_appears_and_goes_away(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        tip = app.verify_tooltip
+        assert tip._tip is None
+        tip.show()
+        assert tip._tip is not None and tip._tip.winfo_exists()
+        tip._hide()
+        assert tip._tip is None
+    finally:
+        _close(app)
+
+
+def test_showing_the_tooltip_twice_makes_only_one_window(tmp_path, monkeypatch):
+    app, _ = _make_app(tmp_path, monkeypatch)
+    try:
+        tip = app.verify_tooltip
+        tip.show()
+        first = tip._tip
+        tip.show()
+        assert tip._tip is first
+        tip._hide()
+    finally:
+        _close(app)
+
+
+def test_a_pending_tooltip_does_not_outlive_the_app(tmp_path, monkeypatch):
+    """A scheduled after() firing into a destroyed widget is the classic
+    way a Tk app dies on close with no visible error."""
+    app, _ = _make_app(tmp_path, monkeypatch)
+    tip = app.verify_tooltip
+    tip._schedule()
+    assert tip._after_id is not None
+    _close(app)
+    tip._hide()      # must not raise even though the widget is gone
+    tip.show()       # nor must this

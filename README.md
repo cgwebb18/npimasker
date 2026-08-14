@@ -47,7 +47,15 @@ columns get this treatment vs. whole-cell encryption.
      **Load Key from File...** and pick that same `.key` file.
 5. Confirm the output path (auto-filled next to the input file) and click
    **Run**.
-6. Store or send the encrypted CSV and the `.key` file **separately** (e.g.
+6. Optionally tick **Verify output** before running. It re-reads the
+   finished file and checks every value — see "What NPIMasker does not
+   change" below. It's off by default because on a quick run it roughly
+   doubles the time; on a slow one (where columns are scanned for
+   sensitive text) it costs almost nothing, so it's worth ticking there.
+7. A progress bar and a row count show what's happening during the run.
+   Large files take a while — see the timings below — and the window stays
+   responsive throughout, so you can move it around while it works.
+8. Store or send the encrypted CSV and the `.key` file **separately** (e.g.
    don't email them in the same message).
 
 If you decrypt with the wrong key, or a value got corrupted, NPIMasker shows
@@ -57,6 +65,43 @@ If you accidentally point **Encrypt** at a file that has already been
 encrypted, NPIMasker stops and tells you, naming the row and column, rather
 than encrypting it a second time. Decrypt that file first, or pick a
 different input.
+
+## What NPIMasker does not change
+
+Everything other than the values you asked to encrypt comes back exactly as
+it went in — same bytes, not merely the same content.
+
+- **The file's encoding is preserved.** A Windows-1252 export comes back as
+  Windows-1252; a UTF-16 file comes back as UTF-16. Output used to always be
+  UTF-8, which meant accented characters and smart quotes turned to mojibake
+  the moment Excel reopened the file.
+- **A byte-order mark is neither added nor removed.**
+- **Line endings are preserved** — a file with Unix line endings doesn't
+  come back with Windows ones, and a file that didn't end with a newline
+  doesn't grow one.
+- **Quoting and spacing are preserved.** Any row you didn't change is copied
+  through verbatim rather than rewritten, so `"1","Zoe"` stays exactly that
+  instead of becoming `1,Zoe`.
+- **Rows and columns you didn't select are untouched**, including blank
+  lines, ragged rows, leading zeros and formula-looking cells.
+
+Two limits worth knowing, both deliberate:
+
+- In a row that *did* change, cells other than the encrypted one may lose
+  quotes they didn't strictly need. They always read back as identical
+  values; only the punctuation around them can differ.
+- Encrypted text is plain ASCII. If *every* accented character in a file
+  happens to sit in an encrypted column, the encrypted file no longer
+  carries any clue about the original encoding, so decrypting it later
+  produces UTF-8. The text is recovered exactly; only the encoding differs.
+  Any untouched column containing an accent prevents this.
+
+**Verify output** (the checkbox next to Run) checks all of this on the
+finished file before handing it to you: unselected columns unchanged, every
+encrypted value decrypting back to exactly what it was, no encrypted value
+left behind after a decrypt, and matching row and column counts. If anything
+doesn't line up the run fails and no file is written — an existing file from
+a previous run is left alone.
 
 ## Troubleshooting
 
@@ -163,6 +208,24 @@ picked in the column list. The defaults come from the column header:
     detect embedded street addresses or phone numbers in free text (put
     those in dedicated, whole-cell columns instead if you need them
     protected reliably).
+
+### File encodings
+
+NPIMasker works out a file's encoding before reading it, checking for a
+byte-order mark first (UTF-8, UTF-16 and UTF-32, either byte order), then
+falling back to UTF-8, Windows-1252 and Latin-1 in that order.
+
+UTF-16 matters more than it sounds: files big enough to be awkward usually
+don't come from Excel, which stops at about a million rows — they come from
+PowerShell, where `Out-File` and `>` write UTF-16 by default. Such a file
+used to be misread as Windows-1252, which made every column name after the
+first show up **blank** in the column list, and produced a corrupted output
+file without reporting anything wrong.
+
+If a file contains bytes that can't be text in any encoding NPIMasker
+supports, it says so and stops rather than guessing.
+
+### Decrypting
 
 When **decrypting**, the header is not consulted at all: each cell says what
 it is. A cell holding `[[ENC:...]]` markers has those markers swapped back

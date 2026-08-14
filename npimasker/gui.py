@@ -1,5 +1,6 @@
 """Tkinter GUI for NPIMasker."""
 
+import contextlib
 import logging
 import os
 import queue
@@ -44,14 +45,82 @@ DECRYPT_LABELS = {SKIP: "Skip", SCAN: "Decrypt", WHOLE: "Decrypt"}
 
 _CYCLE = (SKIP, SCAN, WHOLE)
 
+VERIFY_TOOLTIP = (
+    "Re-reads the finished file and checks every value: columns you did "
+    "not select are unchanged, and every encrypted cell decrypts back to "
+    "exactly what it was.\n\n"
+    "If anything does not match, the run fails and no file is written.\n\n"
+    "Roughly doubles the time on a fast run. On a slow one - where columns "
+    "are scanned for sensitive text - it costs almost nothing."
+)
+
+# ttk.Progressbar is integer-valued, so a fraction is scaled onto this.
+_PROGRESS_SCALE = 1000
+
+
+class Tooltip:
+    """A hover label, because Tk has no native tooltip.
+
+    Deliberately small: a borderless Toplevel shown after a short delay
+    and destroyed on leave. The delay matters - without it the tip flashes
+    up whenever the pointer crosses the widget on its way somewhere else.
+    """
+
+    def __init__(self, widget, text: str, delay_ms: int = 500):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self.show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            with contextlib.suppress(tk.TclError):
+                self.widget.after_cancel(self._after_id)
+            self._after_id = None
+
+    def show(self):
+        if self._tip is not None:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 20
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+            tip = tk.Toplevel(self.widget)
+            tip.wm_overrideredirect(True)   # no title bar or border
+            tip.wm_geometry(f"+{x}+{y}")
+            tk.Label(
+                tip, text=self.text, justify="left", wraplength=340,
+                background="#ffffe0", relief="solid", borderwidth=1, padx=6, pady=4,
+            ).pack()
+        except tk.TclError:
+            return  # widget went away mid-hover
+        self._tip = tip
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            with contextlib.suppress(tk.TclError):
+                self._tip.destroy()
+            self._tip = None
+
 
 class App(tk.Tk):
     def __init__(self, log_path):
         super().__init__()
         self.log_path = log_path
         self.title(f"NPIMasker v{__version__}")
-        self.geometry("560x520")
-        self.minsize(480, 440)
+        # Tall enough for the progress bar and status line beneath the Run
+        # row: at the previous 520 the status text was clipped off the
+        # bottom edge, which is exactly the text a long run needs to show.
+        self.geometry("580x600")
+        self.minsize(500, 520)
 
         self.mode = tk.StringVar(value="encrypt")
         self.input_path = tk.StringVar()
@@ -75,6 +144,28 @@ class App(tk.Tk):
         messagebox.showerror(
             "NPIMasker", f"Unexpected error: {exc.__name__}: {val}{self._log_hint()}"
         )
+
+    # -- Progress bar ------------------------------------------------------
+
+    def _progress_reset(self):
+        with contextlib.suppress(tk.TclError):
+            self.progress_bar.stop()
+            self.progress_bar.config(mode="determinate", value=0)
+
+    def _progress_indeterminate(self):
+        """For work with no knowable total - reading a file's header means
+        sniffing its encoding, which has no progress to report."""
+        with contextlib.suppress(tk.TclError):
+            self.progress_bar.config(mode="indeterminate", value=0)
+            self.progress_bar.start(15)
+
+    def _progress_set(self, fraction: float):
+        with contextlib.suppress(tk.TclError):
+            self.progress_bar.stop()
+            self.progress_bar.config(
+                mode="determinate",
+                value=max(0, min(_PROGRESS_SCALE, int(fraction * _PROGRESS_SCALE))),
+            )
 
     def _log_hint(self) -> str:
         """Trailing '...see the log' line for error dialogs, omitted when
@@ -160,8 +251,22 @@ class App(tk.Tk):
         ttk.Button(run_frame, text="Open Log Folder", command=self._open_log_folder).pack(
             side="left"
         )
+        # Off by default: on a fast run verification roughly doubles the
+        # time, and most runs are small. The tooltip explains the trade so
+        # the choice is informed rather than a mystery checkbox.
+        self.verify_var = tk.BooleanVar(value=False)
+        self.verify_check = ttk.Checkbutton(
+            run_frame, text="Verify output", variable=self.verify_var
+        )
+        self.verify_check.pack(side="left", padx=12)
+        self.verify_tooltip = Tooltip(self.verify_check, VERIFY_TOOLTIP)
         self.run_button = ttk.Button(run_frame, text="Run", command=self._run)
         self.run_button.pack(side="right")
+
+        self.progress_bar = ttk.Progressbar(
+            self, mode="determinate", maximum=_PROGRESS_SCALE, value=0
+        )
+        self.progress_bar.pack(fill="x", padx=10)
 
         self.status_var = tk.StringVar(value="")
         ttk.Label(self, textvariable=self.status_var, foreground="gray").pack(
@@ -229,6 +334,10 @@ class App(tk.Tk):
             return
         self.run_button.config(state="disabled" if loading else "normal")
         self.status_var.set("Reading columns..." if loading else "")
+        if loading:
+            self._progress_indeterminate()
+        else:
+            self._progress_reset()
 
     def _populate_columns(self, headers: list[str]):
         """Rebuild the column list, seeding each row's default treatment.
@@ -408,16 +517,19 @@ class App(tk.Tk):
         self._run_active = True
         self.run_button.config(state="disabled")
         self.status_var.set("Running...")
+        self._progress_set(0.0)
 
         thread = threading.Thread(
             target=self._process_worker,
-            args=(input_path, output_path, key, mode, selected, overrides),
+            args=(input_path, output_path, key, mode, selected, overrides,
+                  self.verify_var.get()),
             daemon=True,
         )
         thread.start()
         self.after(100, self._poll_progress, output_path, mode)
 
-    def _process_worker(self, input_path, output_path, key, mode, selected, overrides):
+    def _process_worker(self, input_path, output_path, key, mode, selected, overrides,
+                        verify=False):
         """Runs on a background thread so the Tk event loop keeps pumping
         messages during long CSV runs, instead of Windows showing the app
         as unresponsive for the whole run."""
@@ -429,7 +541,8 @@ class App(tk.Tk):
                 mode,
                 selected,
                 whole_cell_overrides=overrides,
-                progress_callback=lambda row: self._progress_queue.put(("progress", row)),
+                verify=verify,
+                progress_callback=lambda u: self._progress_queue.put(("progress", u)),
             )
         except Exception as exc:  # surface everything: a windowed app has no stderr
             logger.exception("process_csv failed")
@@ -442,7 +555,11 @@ class App(tk.Tk):
             while True:
                 kind, payload = self._progress_queue.get_nowait()
                 if kind == "progress":
-                    self.status_var.set(f"Processing... {payload:,} rows")
+                    verb = "Verifying" if payload.phase == "verifying" else "Processing"
+                    self.status_var.set(
+                        f"{verb}... {payload.rows:,} rows ({payload.fraction:.0%})"
+                    )
+                    self._progress_set(payload.fraction)
                 elif kind == "error":
                     self._finish_run()
                     self._show_run_error(payload)
@@ -459,6 +576,9 @@ class App(tk.Tk):
     def _finish_run(self):
         self._run_active = False
         self.run_button.config(state="disabled" if self._loading_columns else "normal")
+        # Reset rather than leave the bar full: a finished run and a failed
+        # one must not look the same, and the next run starts from zero.
+        self._progress_reset()
 
     def _on_close(self):
         """Confirm before quitting mid-run. The worker is a daemon thread,
