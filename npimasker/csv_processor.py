@@ -11,10 +11,12 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from itertools import zip_longest
 
 from npimasker.crypto import (
     AlreadyEncryptedError,
     WrongKeyError,
+    contains_decryptable_marker,
     contains_marker,
     decrypt_text_spans,
     decrypt_value,
@@ -252,7 +254,7 @@ def _remove_inflight_temps():
 
 
 @contextlib.contextmanager
-def _atomic_output(output_path: str, info: EncodingInfo | None = None):
+def _atomic_output(output_path: str, info: EncodingInfo | None = None, before_commit=None):
     """Yield a writable handle whose contents only appear at output_path
     if the caller finishes without raising.
 
@@ -299,6 +301,10 @@ def _atomic_output(output_path: str, info: EncodingInfo | None = None):
             # terminates every row. An unmodified one was written verbatim
             # and already lacks the terminator, so this is a no-op there.
             _strip_final_newline(temp_path, info)
+        # Last chance to refuse: raising here leaves no output at all and
+        # never touches a file from a previous run.
+        if before_commit is not None:
+            before_commit(temp_path)
         os.replace(temp_path, output_path)
         temp_path = None  # ownership handed to output_path
     finally:
@@ -313,6 +319,103 @@ def _atomic_output(output_path: str, info: EncodingInfo | None = None):
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+class VerificationError(Exception):
+    """Raised when the written output does not match what was intended.
+
+    Deliberately not a WrongKeyError: the key is fine and the input is
+    fine, but the file we produced is not one we are willing to hand over.
+    """
+
+
+def _verify_output(
+    input_path: str,
+    output_path: str,
+    key: bytes,
+    mode: str,
+    selected: set[int],
+    info: EncodingInfo,
+) -> None:
+    """Read the finished file back and prove it against the input.
+
+    Runs before the temp file is renamed into place, so a failure leaves
+    no output and never touches an existing one.
+
+    The two modes are not equally strong, and it is worth being honest
+    about which is which. Encrypting, this is an independent inverse:
+    decryption is a different code path, so a wrong value written by the
+    encrypt path has no way to also satisfy the decrypt path. Decrypting,
+    it re-runs the same computation, so it checks structure, alignment and
+    I/O rather than logic - and the real weight there is on the leftover
+    check, which catches the failure mode where a value was silently not
+    decrypted at all.
+    """
+    with open(input_path, newline="", encoding=info.read_codec) as fin, open(
+        output_path, newline="", encoding=info.read_codec
+    ) as fout:
+        rows_in, rows_out = csv.reader(fin), csv.reader(fout)
+        headers: list[str] = []
+
+        for number, (src, out) in enumerate(zip_longest(rows_in, rows_out), start=1):
+            if src is None:
+                raise VerificationError(
+                    f"The output has more rows than the input (at row {number})."
+                )
+            if out is None:
+                raise VerificationError(
+                    f"The output is missing rows the input had (at row {number})."
+                )
+            if len(src) != len(out):
+                raise VerificationError(
+                    f"Row {number} has {len(out)} fields but the input had {len(src)}."
+                )
+            if number == 1:
+                if src != out:
+                    raise VerificationError("The header row was altered.")
+                headers = src
+                continue
+
+            for idx, (before, after) in enumerate(zip(src, out)):
+                column = headers[idx] if idx < len(headers) else str(idx)
+                if idx not in selected:
+                    if before != after:
+                        raise VerificationError(
+                            f"Row {number}, column '{column}' was changed, but that "
+                            f"column was not selected."
+                        )
+                    continue
+                _verify_cell(before, after, key, mode, number, column)
+
+
+def _verify_cell(before: str, after: str, key: bytes, mode: str, number: int, column: str):
+    if mode == "decrypt":
+        # Checked before the recomputation below, because when a value was
+        # simply never decrypted both checks fire and this is the one that
+        # says why. A plaintext that genuinely looks like our output is
+        # possible but vanishingly unlikely, and a false alarm is far
+        # cheaper than shipping a file that still holds encrypted values.
+        if contains_decryptable_marker(after) or looks_like_token(after):
+            raise VerificationError(
+                f"Row {number}, column '{column}' still holds an encrypted value "
+                f"after decryption."
+            )
+
+    try:
+        if mode == "encrypt":
+            if _decrypt_cell(after, key) != before:
+                raise VerificationError(
+                    f"Row {number}, column '{column}' does not decrypt back to its "
+                    f"original value."
+                )
+        elif _decrypt_cell(before, key) != after:
+            raise VerificationError(
+                f"Row {number}, column '{column}' was not decrypted correctly."
+            )
+    except WrongKeyError as exc:
+        raise VerificationError(
+            f"Row {number}, column '{column}' could not be checked: {exc}"
+        ) from exc
 
 
 def _records_with_source(stream):
@@ -410,6 +513,7 @@ def process_csv(
     mode: str,
     selected_columns: list[int],
     whole_cell_overrides: dict[int, bool] | None = None,
+    verify: bool = True,
     progress_callback=None,
     progress_interval_rows: int = _PROGRESS_INTERVAL_ROWS,
     progress_interval_seconds: float = _PROGRESS_INTERVAL_SECONDS,
@@ -470,7 +574,14 @@ def process_csv(
         "Input encoding: %s, bom=%s, newline=%r",
         info.read_codec, bool(info.bom), info.newline,
     )
-    with _atomic_output(output_path, info) as outfile, open(
+    def _check(temp_path):
+        if not verify:
+            return
+        checked = time.monotonic()
+        _verify_output(input_path, temp_path, key, mode, selected, info)
+        logger.info("process_csv verified in %.1fs", time.monotonic() - checked)
+
+    with _atomic_output(output_path, info, before_commit=_check) as outfile, open(
         input_path, newline="", encoding=info.read_codec
     ) as infile:
         reader = _records_with_source(infile)
