@@ -4,11 +4,13 @@ import atexit
 import codecs
 import contextlib
 import csv
+import io
 import logging
 import os
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 
 from npimasker.crypto import (
     AlreadyEncryptedError,
@@ -57,6 +59,155 @@ def _decodes_cleanly(input_path: str, encoding: str) -> bool:
     return True
 
 
+class UnsupportedEncodingError(ValueError):
+    """Raised when a file is not text in any encoding we can safely read."""
+
+
+@dataclass(frozen=True)
+class EncodingInfo:
+    """Everything about a file's byte-level shape that output must match.
+
+    read_codec and write_codec differ because Python's BOM handling is
+    asymmetric: "utf-8-sig" strips a BOM on read but *adds* one on write,
+    and "utf-16" detects endianness on read but always writes little-endian.
+    So reading uses the BOM-aware codec and writing uses an explicit,
+    BOM-free one, with the exact BOM bytes re-emitted by hand.
+
+    Keeping `bom` as data rather than folding it into the codec is what
+    stops a BOM-less UTF-8 file from silently acquiring a BOM on the way
+    out - the two facts are genuinely independent.
+    """
+
+    read_codec: str
+    write_codec: str
+    bom: bytes = b""
+    newline: str = "\r\n"
+    final_newline: bool = True
+
+    @classmethod
+    def default(cls) -> "EncodingInfo":
+        return cls(read_codec="utf-8", write_codec="utf-8")
+
+
+# A BOM is authoritative, so it is checked before anything else. UTF-32LE
+# must be tested before UTF-16LE: BOM_UTF32_LE is b"\xff\xfe\x00\x00", which
+# starts with BOM_UTF16_LE, so the other order silently misreads UTF-32.
+_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32", "utf-32-le"),
+    (codecs.BOM_UTF32_BE, "utf-32", "utf-32-be"),
+    (codecs.BOM_UTF8, "utf-8-sig", "utf-8"),
+    (codecs.BOM_UTF16_LE, "utf-16", "utf-16-le"),
+    (codecs.BOM_UTF16_BE, "utf-16", "utf-16-be"),
+)
+
+# A BOM-less UTF-16 file is ASCII interleaved with NULs, so nearly every NUL
+# sits on one parity of byte offset. Require both a decisive parity split and
+# enough NULs to be meaningful, or refuse - guessing here is what produced
+# blank column names in the first place.
+_NUL_PARITY_RATIO = 0.9
+_NUL_DENSITY = 0.1
+
+
+def _bomless_utf16_codec(head: bytes) -> str:
+    even = sum(1 for i in range(0, len(head), 2) if head[i] == 0)
+    odd = sum(1 for i in range(1, len(head), 2) if head[i] == 0)
+    total = even + odd
+    if total >= len(head) * _NUL_DENSITY:
+        if odd >= total * _NUL_PARITY_RATIO:
+            return "utf-16-le"
+        if even >= total * _NUL_PARITY_RATIO:
+            return "utf-16-be"
+    raise UnsupportedEncodingError(
+        "This file contains NUL bytes, so it is not plain text, but it has "
+        "no byte-order mark and does not look like UTF-16 either. If it is a "
+        "spreadsheet or a compressed file, export it as CSV first; if it is "
+        "text, re-save it as UTF-8."
+    )
+
+
+def _line_terminator(head: bytes, info_codec: str, bom: bytes) -> str:
+    """First line ending in the file, searched in decoded text.
+
+    Decoded, not raw: in UTF-16 a newline is two bytes, so scanning for
+    b"\\n" would match the low half of an unrelated character.
+    """
+    text = head[len(bom):].decode(info_codec, errors="ignore")
+    found = [(text.find(nl), nl) for nl in ("\r\n", "\n", "\r")]
+    found = [(at, nl) for at, nl in found if at >= 0]
+    if not found:
+        return "\r\n"
+    # Earliest wins; on a tie prefer the longer match so "\r\n" beats "\r".
+    return min(found, key=lambda item: (item[0], -len(item[1])))[1]
+
+
+def _ends_with_newline(input_path: str, newline: str, write_codec: str) -> bool:
+    suffix = newline.encode(write_codec)
+    size = os.path.getsize(input_path)
+    if size < len(suffix):
+        return False
+    with open(input_path, "rb") as f:
+        f.seek(size - len(suffix))
+        return f.read() == suffix
+
+
+def detect_encoding_info(input_path: str) -> EncodingInfo:
+    """Detect the codec, BOM, and line terminator of a CSV.
+
+    Order matters and is the whole fix: a BOM is checked first, then NUL
+    bytes are taken as proof this is not an 8-bit encoding, and only then
+    do we fall through to the utf-8/cp1252/latin-1 ladder. Previously the
+    ladder came first, and cp1252 - which accepts any byte - swallowed
+    UTF-16 files whole, yielding headers full of embedded NULs.
+    """
+    with open(input_path, "rb") as f:
+        head = f.read(_SNIFF_CHUNK_BYTES)
+
+    for bom, read_codec, write_codec in _BOMS:
+        if head.startswith(bom):
+            return _complete(input_path, read_codec, write_codec, bom)
+
+    if b"\x00" in head:
+        codec = _bomless_utf16_codec(head)
+        return _complete(input_path, codec, codec, b"")
+
+    for codec in ("utf-8-sig", "cp1252"):
+        if _decodes_as(input_path, codec):
+            write_codec = "utf-8" if codec == "utf-8-sig" else codec
+            return _complete(input_path, codec, write_codec, b"")
+    return _complete(input_path, "latin-1", "latin-1", b"")
+
+
+def _complete(input_path: str, read_codec: str, write_codec: str, bom: bytes) -> EncodingInfo:
+    with open(input_path, "rb") as f:
+        head = f.read(_SNIFF_CHUNK_BYTES)
+    newline = _line_terminator(head, write_codec, bom)
+    return EncodingInfo(
+        read_codec=read_codec,
+        write_codec=write_codec,
+        bom=bom,
+        newline=newline,
+        final_newline=_ends_with_newline(input_path, newline, write_codec),
+    )
+
+
+def _decodes_as(input_path: str, encoding: str) -> bool:
+    """The pre-existing 8-bit ladder test, unchanged.
+
+    Under 3 bytes the file could be nothing but a truncated BOM, where an
+    incremental utf-8-sig decoder accepts what a one-shot decode rejects.
+    Tiny by definition, so just decode it outright.
+    """
+    if os.path.getsize(input_path) < 3:
+        with open(input_path, "rb") as f:
+            raw = f.read()
+        try:
+            raw.decode(encoding)
+        except UnicodeDecodeError:
+            return False
+        return True
+    return _decodes_cleanly(input_path, encoding)
+
+
 def detect_csv_encoding(input_path: str) -> str:
     """Best-effort detection of a CSV's text encoding.
 
@@ -65,27 +216,16 @@ def detect_csv_encoding(input_path: str) -> str:
     like 0xb7. Fall back through cp1252 to latin-1, which never fails since
     it maps every byte 0-255 to a codepoint.
 
-    Reads in chunks rather than slurping the file: the whole-file version
-    cost ~2-3x the file size in peak memory (the bytes, plus a str that is
-    thrown away immediately), on top of everything else this tool holds.
+    Kept as a thin wrapper over detect_encoding_info so its long-standing
+    return values ("utf-8-sig" / "cp1252" / "latin-1") stay exactly as they
+    were. Callers that need to *write* a file want detect_encoding_info
+    instead: this name cannot distinguish "UTF-8 with a BOM" from "UTF-8
+    without one", and writing with utf-8-sig would add a BOM that was
+    never in the input.
     """
-    for encoding in ("utf-8-sig", "cp1252"):
-        # Under 3 bytes the file could be nothing but a truncated BOM,
-        # where an incremental utf-8-sig decoder accepts what a one-shot
-        # decode rejects. Tiny by definition, so just decode it outright.
-        if os.path.getsize(input_path) < 3:
-            with open(input_path, "rb") as f:
-                raw = f.read()
-            try:
-                raw.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        elif not _decodes_cleanly(input_path, encoding):
-            continue
-        logger.info("Detected input encoding: %s", encoding)
-        return encoding
-    logger.info("Detected input encoding: latin-1 (fallback)")
-    return "latin-1"
+    encoding = detect_encoding_info(input_path).read_codec
+    logger.info("Detected input encoding: %s", encoding)
+    return encoding
 
 
 _inflight_temps: set[str] = set()
@@ -112,7 +252,7 @@ def _remove_inflight_temps():
 
 
 @contextlib.contextmanager
-def _atomic_output(output_path: str):
+def _atomic_output(output_path: str, info: EncodingInfo | None = None):
     """Yield a writable handle whose contents only appear at output_path
     if the caller finishes without raising.
 
@@ -128,18 +268,39 @@ def _atomic_output(output_path: str):
     rather than the umask default; on POSIX that means the output is
     owner-only, which is the safer default for a file full of PII (and is
     moot on Windows, the deployment target).
+
+    The output is written in the input's codec, with the input's BOM, so a
+    cp1252 or UTF-16 file comes back in the encoding it arrived in. The BOM
+    goes out as raw bytes before the text wrapper is attached, because the
+    BOM-writing codecs cannot express "UTF-16 big-endian" or "UTF-8 without
+    a BOM" - see EncodingInfo.
     """
+    info = info or EncodingInfo.default()
     out_dir = os.path.dirname(os.path.abspath(output_path))
     fd, temp_path = tempfile.mkstemp(dir=out_dir, prefix=".npimasker-", suffix=".tmp")
     created = temp_path
     with _inflight_lock:
         _inflight_temps.add(created)
+    handle = None
     try:
-        with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
-            yield handle
+        raw = os.fdopen(fd, "wb")
+        if info.bom:
+            raw.write(info.bom)
+        # errors="strict": a character the output codec cannot hold must
+        # fail the run, never be silently replaced with "?".
+        handle = io.TextIOWrapper(
+            raw, encoding=info.write_codec, newline="", errors="strict"
+        )
+        yield handle
+        handle.close()  # flushes the encoder; may raise UnicodeEncodeError
+        handle = None
         os.replace(temp_path, output_path)
         temp_path = None  # ownership handed to output_path
     finally:
+        if handle is not None:
+            # Already unwinding from an error; a second one here would mask it.
+            with contextlib.suppress(Exception):
+                handle.close()
         with _inflight_lock:
             _inflight_temps.discard(created)
         if temp_path is not None:
@@ -151,7 +312,7 @@ def _atomic_output(output_path: str):
 
 def read_headers(input_path: str) -> list[str]:
     """Read just the header row of a CSV, for building a column checklist."""
-    with open(input_path, newline="", encoding=detect_csv_encoding(input_path)) as f:
+    with open(input_path, newline="", encoding=detect_encoding_info(input_path).read_codec) as f:
         reader = csv.reader(f)
         return next(reader, [])
 
@@ -253,11 +414,16 @@ def process_csv(
     last_reported_rows = 0
     last_reported_at = start
 
-    with _atomic_output(output_path) as outfile, open(
-        input_path, newline="", encoding=detect_csv_encoding(input_path)
+    info = detect_encoding_info(input_path)
+    logger.info(
+        "Input encoding: %s, bom=%s, newline=%r",
+        info.read_codec, bool(info.bom), info.newline,
+    )
+    with _atomic_output(output_path, info) as outfile, open(
+        input_path, newline="", encoding=info.read_codec
     ) as infile:
         reader = csv.reader(infile)
-        writer = csv.writer(outfile)
+        writer = csv.writer(outfile, lineterminator=info.newline)
 
         headers = next(reader, None)
         if headers is None:
