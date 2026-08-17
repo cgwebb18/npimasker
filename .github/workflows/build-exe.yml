@@ -3,10 +3,40 @@ name: Build app
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
+  # Gates the build below. Without this a broken commit still produced a
+  # green artifact, which is worse than no artifact: it looks shippable.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu for speed, windows because that is what partners run and
+        # several of the behaviours under test (encoding detection, path
+        # handling, Tk rendering) are the ones that differ there.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      # -rs prints the reason for every skip. The GUI tests skip themselves
+      # when Tk is missing, and a whole suite quietly skipping is worse than
+      # one failing - it looks like coverage that is not there.
+      - name: Run tests
+        run: pytest tests/ -q -rs
+
   build:
+    needs: test
     strategy:
       matrix:
         include:
@@ -20,9 +50,9 @@ jobs:
             pyinstaller_args: --windowed --name NPIMasker --collect-all spacy --collect-all en_core_web_sm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -33,7 +63,7 @@ jobs:
         run: pyinstaller ${{ matrix.pyinstaller_args }} main.py
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.build_path }}
