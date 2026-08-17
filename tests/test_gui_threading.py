@@ -15,12 +15,22 @@ import queue
 import sys
 import threading
 import time
-import tkinter as tk
 import types
 
 import pytest
 
-from npimasker import gui
+# Tk can be missing in two different ways and both have to skip, not error.
+# A Python built without _tkinter fails at *import*, which a bare TclError
+# guard does not catch - the module then errors during collection and takes
+# the whole run down with it. That is the usual case on a Linux CI runner,
+# where the interpreter often ships without Tk at all.
+try:
+    import tkinter as tk
+
+    from npimasker import gui  # imports tkinter itself
+except ImportError as exc:
+    pytest.skip(f"tkinter is unavailable: {exc}", allow_module_level=True)
+
 from npimasker.crypto import WrongKeyError, derive_key, looks_like_token
 from npimasker.csv_processor import ProgressUpdate, process_csv
 
@@ -30,8 +40,8 @@ try:
     # *next* root in the same process abort on macOS/Tk 9.
     _probe.withdraw()
     _probe.destroy()
-except tk.TclError as exc:  # headless CI has no display
-    pytest.skip(f"Tk is unavailable: {exc}", allow_module_level=True)
+except tk.TclError as exc:  # Tk is installed, but there is no display
+    pytest.skip(f"Tk has no display: {exc}", allow_module_level=True)
 
 
 # Only whole-cell headers (name/phone/address), so no run in this module
