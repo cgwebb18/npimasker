@@ -1,0 +1,31 @@
+﻿ref_id,site_code,service_date,category,sub_category,status_note,amount,comment
+100045,STL-02,2026-03-04,Intake,Standard,,412.00,first pass
+100045,STL-02,2026-03-04,Intake,Standard,Reviewed,412.00,has status
+100045,STL-02,2026-03-04,Intake,Standard,,412.00,later blank
+100077,BAL-11,2026-03-05,Renewal,Priority,Open,88.50,both filled
+100077,BAL-11,2026-03-05,Renewal,Priority,Closed,88.50,"both filled, later wins"
+100091,ARL-07,2026-03-06,Intake,Standard,,0.00,all blank
+100091,ARL-07,2026-03-06,Intake,Standard,,0.00,"all blank, later wins"
+100091,arl-07,2026-03-06,Intake,Standard,Escalated,0.00,case differs - not a duplicate
+100112,"FFX-03 ",2026-03-06,Appeal,Standard,Verified,1250.75,trailing space in site_code
+100112,FFX-03,2026-03-06,Appeal,Standard,,1250.75,no trailing space
+100130,LOU-09,2026-03-07,Intake,Standard,"  ",305.00,spaces-only status
+100130,LOU-09,2026-03-07,Intake,Standard,,305.00,empty status
+100158,STL-02,2026-03-08,Renewal,Standard,Reviewed,67.20,unique
+100164,BAL-11,2026-03-09,Intake,Priority,,910.00,unique
+100170,ARL-07,2026-03-09,Appeal,Standard,Open,44.00,unique
+100181,FFX-03,2026-03-10,Intake,Standard,Reviewed,512.10,three-way group
+100181,FFX-03,2026-03-10,Intake,Standard,,512.10,three-way group
+100181,FFX-03,2026-03-10,Intake,Standard,,512.10,"three-way group, tie beats order"
+100199,LOU-09,2026-03-11,Renewal,Priority,Closed,73.45,unique
+100203,STL-02,2026-03-11,Intake,Standard,Open,150.00,"comma, in free text"
+100203,STL-02,2026-03-11,Intake,Standard,Open,150.00,"quoted ""text"" and
+an embedded newline"
+100220,BAL-11,2026-03-12,REF NOTE: Intake,Standard,,61.00,prefixed
+100220,BAL-11,2026-03-12,Intake,Standard,Reviewed,61.00,"bare - tie value, wins"
+100234,ARL-07,2026-03-12,REF NOTE: Appeal,Priority,Open,77.00,"prefixed, has value"
+100234,ARL-07,2026-03-12,Appeal,Priority,,77.00,"bare, blank - prefixed row wins"
+100248,STL-02,2026-03-13,REF NOTE:Renewal,Standard,A,99.00,no space after colon
+100248,STL-02,2026-03-13,Renewal,Standard,B,99.00,"bare, later wins"
+100255,LOU-09,2026-03-13,ref note: Intake,Standard,C,12.00,lowercase prefix - not stripped
+100255,LOU-09,2026-03-13,Intake,Standard,D,12.00,bare
