@@ -66,3 +66,7 @@ export function cellsOf(rows){
     return v === undefined || v === null ? "" : String(v);
   };
 }
+
+export function loadGrid(){
+  return exportsOf(region("grid"), ["gridToTable", "headerLabel", "colLetter"]);
+}

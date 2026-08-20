@@ -293,6 +293,52 @@ let RULECFG = [];   // ordered survivor-rule configs, edited by the builder
 let ENCODING = "utf-8";   // how the last CSV was decoded
 
 /* ---------- strict CSV parsing (no type coercion, RFC4180 quoting) ---------- */
+/* ==== grid:begin ==== */
+
+function colLetter(i){ let s = "", n = i + 1; while (n > 0){ const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = (n - 1 - m) / 26; } return s; }
+
+/* What to call a column that has no heading. It is a real column with real
+   data in it, so name it the way the spreadsheet does rather than implying
+   something is broken. */
+function headerLabel(headers, i){
+  const h = headers[i];
+  return (h && h.length) ? h : "column " + colLetter(i);
+}
+
+/* Turn a raw parsed grid into headers and rows of equal width.
+
+   The width comes from the widest column that actually carries something,
+   across every row -- not from the header row and not from the sheet's
+   declared range. Two bugs die here:
+
+   - xlsx <dimension> is routinely over-declared (deleted columns, leftover
+     formatting), and SheetJS 0.18.5 trusts it without checking. sheet_to_json
+     pads every row out to that width, and each phantom column surfaced in the
+     picker as an unnamed one.
+   - Taking the width from the header row alone silently dropped any column the
+     header did not reach, losing real data with no warning. */
+function gridToTable(grid){
+  const kept = grid.filter(row => row.some(c => String(c == null ? "" : c).length));
+  let last = -1;
+  for (const row of kept){
+    for (let i = row.length - 1; i > last; i--){
+      if (String(row[i] == null ? "" : row[i]).length){ last = i; break; }
+    }
+  }
+  const width = last + 1;
+  const cell = (row, i) => { const v = row[i]; return v == null ? "" : String(v); };
+  const headers = new Array(width);
+  for (let i = 0; i < width; i++) headers[i] = kept.length ? cell(kept[0], i) : "";
+  const rows = kept.slice(1).map(row => {
+    const out = new Array(width);
+    for (let i = 0; i < width; i++) out[i] = cell(row, i);
+    return out;
+  });
+  return { headers, rows, width };
+}
+
+/* ==== grid:end ==== */
+
 /* ==== csv:begin ==== */
 
 /* Work out how the bytes of a CSV are encoded, rather than assuming UTF-8.
@@ -370,6 +416,28 @@ function toCSV(headers, rows){
 /* ==== csv:end ==== */
 
 /* ---------- loading ---------- */
+
+/* SheetJS takes the sheet's range straight from the xlsx <dimension> tag.
+   Some writers set that to the whole sheet (A1:XFD1048576); sheet_to_json
+   would then walk seventeen billion cells and freeze the tab with no error at
+   all. When the declared range looks implausible, work it out from the cells
+   that actually exist. */
+function usedRange(ws){
+  const ref = ws["!ref"];
+  if (!ref) return ref;
+  let r;
+  try { r = XLSX.utils.decode_range(ref); } catch (e) { return ref; }
+  if (r.e.c - r.s.c < 1000) return ref;
+  let maxR = 0, maxC = 0;
+  for (const k in ws){
+    if (k.charCodeAt(0) === 33) continue;   // "!"
+    const c = XLSX.utils.decode_cell(k);
+    if (c.r > maxR) maxR = c.r;
+    if (c.c > maxC) maxC = c.c;
+  }
+  return XLSX.utils.encode_range({ s:{ r:0, c:0 }, e:{ r:maxR, c:maxC } });
+}
+
 const drop = $("#drop"), fileInput = $("#file");
 drop.addEventListener("click", () => fileInput.click());
 drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("hot"); });
@@ -413,18 +481,25 @@ function load(file){
         } else {
           const wb = XLSX.read(new Uint8Array(r.result), { type:"array", cellDates:false, cellNF:false, cellStyles:false });
           const ws = wb.Sheets[wb.SheetNames[0]];
-          if (!ws) throw new Error("no sheet");
+          if (!ws){
+            // The workbook listed a sheet but none came back. In this build
+            // that means a part of the file was too big for the browser to
+            // decode -- a single zip part over 512MB of text, which one column
+            // of very long values is enough to cause -- and the failure was
+            // swallowed on the way up.
+            throw new Error(wb.SheetNames.length
+              ? "the sheet could not be decoded. This usually means one column holds so much text that the file exceeds what a browser tab can hold. Split the file, or export it as .csv and use that instead"
+              : "the workbook has no sheets");
+          }
+          ws["!ref"] = usedRange(ws);
           grid = XLSX.utils.sheet_to_json(ws, { header:1, raw:false, defval:"", blankrows:false });
         }
-        grid = grid.filter(row => row.some(c => String(c ?? "").length));
-        if (grid.length < 2) throw new Error("needs a header row and at least one data row");
-        HEADERS = grid[0].map(h => String(h ?? ""));
-        const w = HEADERS.length;
-        ROWS = grid.slice(1).map(row => {
-          const out = new Array(w);
-          for (let i=0;i<w;i++) out[i] = String(row[i] ?? "");
-          return out;
-        });
+        const table = gridToTable(grid);
+        if (!table.width || !table.rows.length)
+          throw new Error("needs a header row and at least one data row");
+        HEADERS = table.headers;
+        ROWS = table.rows;
+        const w = table.width;
         $("#progress").hidden = true;
         $("#fileInfo").hidden = false;
         $("#fileInfo").innerHTML = "<b>" + file.name + "</b> — " + ROWS.length.toLocaleString() +
@@ -447,7 +522,7 @@ function buildPickers(){
   HEADERS.forEach((h, i) => {
     const b = document.createElement("div");
     b.className = "chip";
-    b.innerHTML = '<span class="ix">' + colLetter(i) + '</span>' + (h || "(unnamed " + (i+1) + ")");
+    b.innerHTML = '<span class="ix">' + colLetter(i) + '</span>' + esc(headerLabel(HEADERS, i));
     b.addEventListener("click", () => {
       if (keySet.has(i)) { keySet.delete(i); b.classList.remove("on"); }
       else { keySet.add(i); b.classList.add("on"); }
@@ -472,8 +547,8 @@ const RULE_TYPES = [
 ];
 const DATEFMT = new Map();   // column -> detectDateFormat() result, cached per file
 
-function colName(i){ return colLetter(i) + " — " + (HEADERS[i] || "(unnamed " + (i+1) + ")"); }
-function shortColName(i){ return HEADERS[i] || ("column " + colLetter(i)); }
+function colName(i){ return colLetter(i) + " — " + headerLabel(HEADERS, i); }
+function shortColName(i){ return headerLabel(HEADERS, i); }
 
 function colSelect(value, onChange){
   const sel = document.createElement("select");
@@ -660,7 +735,7 @@ function completeCfgRow(cfg){
   HEADERS.forEach((h, i) => {
     const b = document.createElement("div");
     b.className = "chip" + (cfg.cols.indexOf(i) !== -1 ? " on" : "");
-    b.innerHTML = '<span class="ix">' + colLetter(i) + '</span>' + esc(h || "(unnamed " + (i+1) + ")");
+    b.innerHTML = '<span class="ix">' + colLetter(i) + '</span>' + esc(headerLabel(HEADERS, i));
     b.addEventListener("click", () => {
       const at = cfg.cols.indexOf(i);
       if (at === -1) cfg.cols.push(i); else cfg.cols.splice(at, 1);
@@ -705,7 +780,6 @@ function ruleProblems(){
   });
   return out;
 }
-function colLetter(i){ let s = "", n = i + 1; while (n > 0){ const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = (n - 1 - m) / 26; } return s; }
 const PFX = new Map();
 function renderPrefixRows(){
   const wrap = $("#prefixWrap"), list = $("#pfxList");
@@ -715,7 +789,7 @@ function renderPrefixRows(){
   for (const c of keys){
     const row = document.createElement("div");
     row.className = "pfx-row";
-    row.innerHTML = '<div class="nm"><span class="ix">' + colLetter(c) + '</span>' + esc(HEADERS[c] || "(unnamed)") + '</div>';
+    row.innerHTML = '<div class="nm"><span class="ix">' + colLetter(c) + '</span>' + esc(headerLabel(HEADERS, c)) + '</div>';
     const inp = document.createElement("input");
     inp.type = "text"; inp.placeholder = "no prefix to ignore";
     inp.value = PFX.get(c) || "";
@@ -1357,7 +1431,7 @@ $("#dlSummary").addEventListener("click", () => {
   L.push("  data rows ............... " + s.rowsIn);
   L.push("");
   L.push("RULE APPLIED");
-  L.push("  match columns ........... " + RESULT.keys.map(i => colLetter(i) + " " + (HEADERS[i] || "(unnamed)")).join(" | "));
+  L.push("  match columns ........... " + RESULT.keys.map(i => colLetter(i) + " " + headerLabel(HEADERS, i)).join(" | "));
   RESULT.chain.forEach((line, i) => {
     L.push("  rule " + (i + 1) + " .................. " + line);
   });
