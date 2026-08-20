@@ -122,6 +122,16 @@ input[type=text]{
 .rule-note.bad{color:var(--drop)}
 .ds-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:6px}
 .ds-row select{flex:1 1 260px;min-width:0;font-size:13.5px}
+#profOut{margin-bottom:14px;overflow-x:auto}
+table.prof{border-collapse:collapse;width:100%;font-size:13px;background:var(--panel);border:1px solid var(--rule)}
+table.prof th,table.prof td{padding:6px 10px;border-bottom:1px solid var(--rule);text-align:left;white-space:nowrap}
+table.prof thead th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:400;background:var(--field)}
+table.prof td.n{text-align:right;font-variant-numeric:tabular-nums}
+table.prof tr.sel td{background:var(--field);font-weight:600}
+.flag{font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+.flag.warn{color:var(--warn)}
+.flag.no{color:var(--drop)}
+.prof-note{font-size:12.5px;color:var(--muted)}
 .chain{margin-top:14px;padding:12px 14px;background:var(--panel);border:1px solid var(--rule);
   border-left:3px solid var(--keep);border-radius:2px;font-size:13.5px;line-height:1.65}
 .chain b{font-weight:600}
@@ -227,6 +237,11 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
       </div>
       <div id="presetNote" class="rule-note"></div>
       <div id="presetWarn" class="err" hidden></div>
+
+      <div class="btnrow" style="margin-bottom:10px">
+        <button class="btn ghost small" id="profBtn">What is in each column?</button>
+      </div>
+      <div id="profOut" hidden></div>
 
       <div class="sub-label">Match columns — rows are duplicates only when <b>every</b> one of these is identical.</div>
       <div class="cols" id="keyCols"></div>
@@ -547,10 +562,11 @@ function load(file){
   // A new file invalidates everything the last one produced. Without this the
   // download buttons stay live, holding the previous file's rows under the new
   // file's name.
-  RESULT = null; RULECFG = []; PFX.clear(); DATEFMT.clear();
+  RESULT = null; RULECFG = []; PFX.clear(); DATEFMT.clear(); PROFILE = null;
   $("#resultStep").hidden = true;
   $("#dlStep").hidden = true;
   $("#mapStep").hidden = true;
+  $("#profOut").hidden = true;
   SRCNAME = file.name.replace(/\.[^.]+$/, "");
   SRCKIND = /\.csv$|\.txt$/i.test(file.name) ? "csv" : "xlsx";
   say("Reading " + file.name + "…", 15);
@@ -907,6 +923,40 @@ function renderChain(){
   $("#ruleChain").innerHTML = html;
 }
 
+/* ---------- what is in each column ---------- */
+
+let PROFILE = null;
+
+$("#profBtn").addEventListener("click", () => {
+  const box = $("#profOut"), btn = $("#profBtn");
+  if (!box.hidden){ box.hidden = true; btn.textContent = "What is in each column?"; return; }
+  btn.textContent = "Working…";
+  setTimeout(() => {
+    if (!PROFILE){
+      const cellAt = (i, c) => ROWS[i][c];
+      PROFILE = HEADERS.map((h, c) => profileColumn(cellAt, ROWS.length, c));
+    }
+    const n = v => v.toLocaleString();
+    box.innerHTML =
+      '<table class="prof"><thead><tr><th>Column</th><th class="n">Filled</th><th class="n">Blank</th>' +
+      '<th class="n">Different values</th><th>Looks like</th><th></th></tr></thead><tbody>' +
+      PROFILE.map(p => {
+        const f = profileFlag(p, ROWS.length);
+        return '<tr' + (keySet.has(p.c) ? ' class="sel"' : '') + '>' +
+          '<td><span class="ix">' + colLetter(p.c) + '</span>' + esc(headerLabel(HEADERS, p.c)) + '</td>' +
+          '<td class="n">' + n(p.filled) + '</td><td class="n">' + n(p.blank) + '</td>' +
+          '<td class="n">' + n(p.distinct) + (p.capped ? "+" : "") + '</td>' +
+          '<td>' + esc(shapeWord(p)) + '</td>' +
+          '<td><span class="flag ' + f.level + '">' + f.text + '</span></td></tr>';
+      }).join("") + '</tbody></table>' +
+      '<div class="prof-note">A column that is unique on every row can never produce a duplicate. ' +
+      'A column with one value throughout adds nothing to the match. Neither is an error — they ' +
+      'just will not do what you might expect.</div>';
+    box.hidden = false;
+    btn.textContent = "Hide the column summary";
+  }, 30);
+});
+
 /* ---------- saved datasets ----------
 
    The page runs from a file:// URL, so it cannot read a folder of presets by
@@ -1137,6 +1187,58 @@ function syncPick(){
    dedupPOC/tests/ slices this block straight out of this file and runs it, so
    the tested code and the shipped code cannot drift apart. Keep it that way.
 */
+/* ==== profile:begin ==== */
+
+/* "What is in each column?" -- the summary that guides the column pick.
+
+   Date-likeness is counted by SHAPE, not by parsing. Counting it by reading
+   every value as month-first, as the original did, would have the summary
+   quietly assume an order that the criteria themselves refuse to assume. */
+
+const PROFILE_CAP = 200000;         // distinct-value counting stops here
+const NUMBERISH = /^\s*-?\d+(\.\d+)?\s*$/;
+const DATEISH = [
+  /^\d{4}-\d{1,2}-\d{1,2}([T ]|$)/,
+  /^\d{1,2}[\/.-]\d{1,2}[\/.-](\d{2}|\d{4})([T, ]|$)/,
+  /^\d{1,2}[\s-][A-Za-z]{3,9}[\s-](\d{2}|\d{4})$/,
+  /^\d{8}$/
+];
+
+function profileColumn(cellAt, n, c, cap){
+  const limit = cap || PROFILE_CAP;
+  const seen = new Set();
+  let blank = 0, numeric = 0, dateish = 0, capped = false;
+  for (let i = 0; i < n; i++){
+    const v = String(cellAt(i, c));
+    if (!v.trim().length){ blank++; continue; }
+    if (seen.size < limit) seen.add(v); else capped = true;
+    const t = v.trim();
+    if (NUMBERISH.test(t)) numeric++;
+    else if (DATEISH.some(re => re.test(t))) dateish++;
+  }
+  return { c, blank, filled: n - blank, distinct: seen.size, capped, numeric, dateish };
+}
+
+/* Neither of these is an error. They are columns that will not do what someone
+   might expect them to do. */
+function profileFlag(p, n){
+  if (!p.filled) return { level:"no", text:"entirely empty" };
+  if (p.distinct === 1) return { level:"warn", text:"one value throughout" };
+  if (p.distinct === p.filled && p.filled === n && !p.capped)
+    return { level:"warn", text:"unique on every row" };
+  return { level:"", text:"" };
+}
+
+function shapeWord(p){
+  if (!p.filled) return "\u2014";
+  if (p.numeric === p.filled) return "all numbers";
+  if (p.dateish === p.filled) return "all dates";
+  if (p.numeric) return "text, " + Math.round(100 * p.numeric / p.filled) + "% numeric";
+  return "text";
+}
+
+/* ==== profile:end ==== */
+
 /* ==== presets:begin ==== */
 
 /* A saved preset is the whole setup for a dataset: the match columns that
@@ -1771,6 +1873,15 @@ function describeChain(cfgs, nameOf){
 }
 
 /* Why this group resolved the way it did, in the deciding rule's own words. */
+/* A timestamp back as a plain date, for display only. */
+function isoDay(t){
+  const d = new Date(t);
+  const p = n => (n < 10 ? "0" : "") + n;
+  const day = d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate());
+  const ms = t - Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return ms ? day + " " + p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) : day;
+}
+
 function reasonFor(rules, trail, decidedBy){
   const say = (lvl, outcome) => {
     const r = rules[lvl];
@@ -1851,7 +1962,16 @@ function collapseRows(o){
     if (samples.length < sampleLimit){
       const dr = pick.decidedBy !== null ? rules[pick.decidedBy] : null;
       const showCol = dr && dr.col !== undefined && dr.col !== null ? dr.col : tie;
-      samples.push({ k, idxs, winner, reason, tie: showCol,
+      // What each criterion saw for each row, so the inspector can show the
+      // comparison rather than only its outcome.
+      const shown = idxs.map(i => rules.map(r => {
+        const sc = r.score(i);
+        if (sc === null || sc === undefined) return null;
+        if (r.type === "count") return String(sc);
+        if (r.type === "date")  return isoDay(sc);
+        return String(sc);
+      }));
+      samples.push({ k, idxs, winner, reason, tie: showCol, shown,
                      trail: pick.trail, decidedBy: pick.decidedBy,
                      pfx: idxs.map(i => !!prefixed[i]) });
     }
@@ -1907,7 +2027,12 @@ function runCollapse(){
     encoding: SRCKIND === "csv" ? ENCODING : null,
     unreadable: rules.map((r, i) => ({ level:i+1, type:r.type, col:r.col, n:r.unreadable || 0 }))
                      .filter(x => x.n > 0),
-    chain: describeChain(RULECFG, shortColName),
+    // `chain` is indexed alongside the built rules, so a switched-off criterion
+    // cannot shift the per-criterion values in the inspector. `chainAll` keeps
+    // the full list, including the off ones, for the run summary.
+    chain: describeChain(RULECFG.filter(ruleIsOn), shortColName),
+    chainAll: describeChain(RULECFG, shortColName),
+    chainCol: rules.map(r => (r.col === undefined ? null : r.col)),
     pfxMap: new Map([...PFX].filter(([c]) => keySet.has(c))),
     pfxTrim: $("#pfxTrim").checked, pfxCase: $("#pfxCase").checked,
     stats: out.stats
@@ -1976,13 +2101,20 @@ function render(){
         .map((v,i) => '<span class="mono">' + esc(HEADERS[RESULT.keys[i]] || colLetter(RESULT.keys[i])) + '</span> = ' + (v.length ? esc(v) : '<span class="empty6">empty</span>'))
         .join(' &nbsp;·&nbsp; ');
       const rows = g.idxs.map((i, j) => {
-        const v = (g.tie === null || g.tie === undefined) ? "" : ROWS[i][g.tie];
         const on = i === g.winner;
+        const seen = (g.shown && g.shown[j]) || [];
+        const cells = seen.map((v, ri) => {
+          const raw = RESULT.chain[ri] ? RESULT.chainCol[ri] : null;
+          const rawTxt = raw === null || raw === undefined ? "" : ROWS[i][raw];
+          const shownTxt = v === null ? '<span class="empty6">no value</span>'
+            : esc(v) + (rawTxt && rawTxt.trim() !== v ? ' <span class="empty6">(' + esc(rawTxt) + ')</span>' : '');
+          return '<span class="v6">' + (ri + 1) + '. ' + shownTxt + '</span>';
+        }).join(' &nbsp;·&nbsp; ');
         return '<div class="row ' + (on ? 'kept' : 'gone') + '">' +
           '<span class="mark"></span>' +
           '<span class="rn">row ' + (i + 2) + '</span>' +
           (g.pfx && g.pfx[j] ? '<span class="pf">prefix cut</span>' : '') +
-          '<span class="v6">' + (v.length ? esc(v) : '<span class="empty6">empty</span>') + '</span>' +
+          (cells || '<span class="v6"><span class="empty6">no criteria</span></span>') +
           '<span class="tag">' + (on ? 'kept' : 'removed') + '</span></div>';
       }).join("");
       return '<div class="group"><div class="gkey">' + (RESULT.anyPfx ? 'compared as &nbsp;· &nbsp;' : '') + parts + '</div>' + rows +
@@ -2054,10 +2186,10 @@ $("#dlSummary").addEventListener("click", () => {
   L.push("");
   L.push("RULE APPLIED");
   L.push("  match columns ........... " + RESULT.keys.map(i => colLetter(i) + " " + headerLabel(HEADERS, i)).join(" | "));
-  RESULT.chain.forEach((line, i) => {
+  RESULT.chainAll.forEach((line, i) => {
     L.push("  rule " + (i + 1) + " .................. " + line);
   });
-  L.push("  rule " + (RESULT.chain.length + 1) + " .................. otherwise keep the row nearest the top of the file");
+  L.push("  fallback ................ keep the row nearest the top of the file");
   L.push("  comparison .............. exact, case and whitespace sensitive");
   if (RESULT.anyPfx){
     for (const [c, p] of RESULT.pfxMap)

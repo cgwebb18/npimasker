@@ -270,3 +270,20 @@ test("choosing the column clears the block", () => {
   p.syncPick();
   assert.equal(p.el("run").disabled, false);
 });
+
+test("a switched-off criterion does not shift the inspector's values", () => {
+  const p = boot();
+  p.keySet.add(0); p.keySet.add(1);
+  p.RULECFG = [
+    { type:"minmax", parse:"text", dir:"min", field:5, on:false },   // off
+    { type:"minmax", parse:"date", dir:"max", field:2, fmt:"ISO" },
+  ];
+  p.syncPick();
+  p.runCollapse();
+  const R = p.RESULT;
+  assert.equal(R.chain.length, 1, "only the active criterion is indexed with the values");
+  assert.equal(R.chainAll.length, 2, "but the summary still lists both");
+  assert.match(R.chainAll[0], /\(off\)/);
+  const g = R.samples[0];
+  assert.equal(g.shown[0].length, 1, "one value per active criterion, correctly aligned");
+});

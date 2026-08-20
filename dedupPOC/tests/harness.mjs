@@ -79,3 +79,7 @@ export function loadPresets(){
   return new Function('"use strict";' + src +
     "\nreturn {" + fields + ", BUILTIN_PRESETS: typeof BUILTIN_PRESETS !== 'undefined' ? BUILTIN_PRESETS : []};")();
 }
+
+export function loadProfile(){
+  return exportsOf(region("profile"), ["profileColumn", "profileFlag", "shapeWord"]);
+}
