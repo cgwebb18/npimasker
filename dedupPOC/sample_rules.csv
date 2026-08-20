@@ -1,0 +1,16 @@
+ref_id,site_code,service_date,invoice_no,phone,email,address,status_note
+S-001,ST-9,2026-01-05,INV-000001,555-0001,s1@example.com,1 First St,single row
+A-100,ST-1,2026-01-10,INV-000100,555-1001,,,earliest visit
+A-100,ST-1,2026-05-20,INV-000900,555-1002,a2@example.com,,latest visit
+A-100,ST-1,2026-03-15,INV-000050,,,,lowest invoice
+B-200,ST-2,2026-04-01,INV-000420,555-2001,b1@example.com,,same day
+B-200,ST-2,2026-04-01,INV-000042,555-2002,,,same day
+C-300,ST-3,2026-06-06,INV-000777,555-3001,,,phone only
+C-300,ST-3,2026-06-06,INV-000777,555-3002,c2@example.com,,phone and email
+C-300,ST-3,2026-06-06,INV-000777,555-3003,c3@example.com,3 Third Ave,all three
+D-400,ST-4,2026-07-07,INV-000123,555-4001,d1@example.com,,identical in every rule
+D-400,ST-4,2026-07-07,INV-000123,555-4002,d2@example.com,,identical in every rule
+E-500,ST-5,2026-02-01,INV-000500,555-5001,e1@example.com,,date readable
+E-500,ST-5,not recorded,INV-000501,555-5002,e2@example.com,,date not readable
+S-002,ST-9,2026-08-08,INV-000002,555-0002,s2@example.com,2 Second St,single row
+S-003,ST-9,2026-09-09,INV-000003,,,,single row

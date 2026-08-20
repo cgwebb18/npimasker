@@ -41,6 +41,8 @@ export function loadRules(){
   const src = region("rules");
   const exported = [
     "collapseRows",
+    "buildRules",
+    "describeChain",
     "makeNorm",
     "pickWinner",
     "makeHasValueRule",

@@ -101,6 +101,30 @@ input[type=text]{
 .pfx-row input{flex:1 1 260px;min-width:0;font-family:'Cascadia Mono','Consolas',monospace;font-size:13px}
 .pf{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--warn);flex:0 0 auto}
 
+/* survivor rules */
+.rule{border:1px solid var(--rule);background:var(--field);border-radius:2px;padding:11px 12px;margin-bottom:8px}
+.rule-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.rule-lvl{font-family:'Cascadia Mono','Consolas',monospace;font-size:11px;color:var(--muted);
+  flex:0 0 auto;border:1px solid var(--rule);border-radius:2px;padding:3px 7px;background:var(--panel)}
+.rule-top select{font-size:13.5px;padding:6px 8px}
+.rule-spacer{flex:1 1 auto}
+.rule-x{background:none;border:1px solid var(--rule);border-radius:2px;color:var(--muted);
+  cursor:pointer;font-size:13px;line-height:1;padding:6px 9px}
+.rule-x:hover{color:var(--drop);border-color:var(--drop)}
+.rule-x:disabled{opacity:.3;cursor:not-allowed}
+.rule-cfg{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:9px;
+  padding-top:9px;border-top:1px dashed var(--rule)}
+.rule-cfg label{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.rule-cfg input[type=text]{font-family:'Cascadia Mono','Consolas',monospace;font-size:13px;min-width:150px}
+.rule-cols{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
+.rule-cols .chip{font-size:12px;padding:4px 9px}
+.rule-note{font-size:12.5px;color:var(--muted);margin-top:7px}
+.rule-note.bad{color:var(--drop)}
+.chain{margin-top:14px;padding:12px 14px;background:var(--panel);border:1px solid var(--rule);
+  border-left:3px solid var(--keep);border-radius:2px;font-size:13.5px;line-height:1.65}
+.chain b{font-weight:600}
+.chain .fall{color:var(--muted)}
+
 /* buttons */
 .btn{
   background:var(--ink);color:#fff;border:1px solid var(--ink);border-radius:2px;
@@ -205,8 +229,13 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
         <label class="opt"><input type="checkbox" id="pfxCase"><span>Recognise the prefix even when its letter case differs.</span></label>
       </div>
 
-      <div class="sub-label">Tiebreak column — when rows collide, a row that has a value here beats a row that doesn't.</div>
-      <select id="tieCol"></select>
+      <div class="sub-label">Survivor rules — applied in order. Each rule only sees the rows the rule above it could not separate.</div>
+      <div id="ruleList"></div>
+      <div class="btnrow">
+        <button class="btn ghost small" id="addRule">Add a rule</button>
+      </div>
+      <div id="ruleChain" class="chain"></div>
+      <div id="ruleErr" class="err" hidden></div>
 
       <label class="opt">
         <input type="checkbox" id="wsBlank" checked>
@@ -227,6 +256,7 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
       <div class="step-note" id="ranAt"></div>
     </div>
     <div class="stats" id="stats"></div>
+    <div id="attrib" class="chain"></div>
     <div id="hazards"></div>
 
     <h3 class="sec disp">Collision inspector</h3>
@@ -259,7 +289,7 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
 "use strict";
 const $ = s => document.querySelector(s);
 let HEADERS = [], ROWS = [], SRCNAME = "data", SRCKIND = "xlsx", RESULT = null;
-let RULES = [];   // ordered survivor rules; empty means "use the tiebreak column"
+let RULECFG = [];   // ordered survivor-rule configs, edited by the builder
 
 /* ---------- strict CSV parsing (no type coercion, RFC4180 quoting) ---------- */
 /* ==== csv:begin ==== */
@@ -330,6 +360,13 @@ function fail(msg){
 
 function load(file){
   $("#loadErr").hidden = true;
+  // A new file invalidates everything the last one produced. Without this the
+  // download buttons stay live, holding the previous file's rows under the new
+  // file's name.
+  RESULT = null; RULECFG = []; PFX.clear(); DATEFMT.clear();
+  $("#resultStep").hidden = true;
+  $("#dlStep").hidden = true;
+  $("#mapStep").hidden = true;
   SRCNAME = file.name.replace(/\.[^.]+$/, "");
   SRCKIND = /\.csv$|\.txt$/i.test(file.name) ? "csv" : "xlsx";
   say("Reading " + file.name + "…", 15);
@@ -385,15 +422,255 @@ function buildPickers(){
     });
     box.appendChild(b);
   });
-  const sel = $("#tieCol"); sel.innerHTML = "";
-  HEADERS.forEach((h, i) => {
-    const o = document.createElement("option");
-    o.value = i; o.textContent = colLetter(i) + " — " + (h || "(unnamed " + (i+1) + ")");
-    sel.appendChild(o);
-  });
-  sel.addEventListener("change", syncPick);
+  RULECFG = [{ type:"hasvalue", col: HEADERS.length > 1 ? 1 : 0, dir:+1 }];
+  DATEFMT.clear();
+  renderRules();
   $("#mapStep").hidden = false;
   syncPick();
+}
+
+/* ---------- the rule builder ---------- */
+
+const RULE_TYPES = [
+  ["hasvalue", "Carries a value"],
+  ["date",     "Earliest / latest date"],
+  ["number",   "Lowest / highest number"],
+  ["complete", "Most values filled"],
+];
+const DATEFMT = new Map();   // column -> detectDateFormat() result, cached per file
+
+function colName(i){ return colLetter(i) + " — " + (HEADERS[i] || "(unnamed " + (i+1) + ")"); }
+function shortColName(i){ return HEADERS[i] || ("column " + colLetter(i)); }
+
+function colSelect(value, onChange){
+  const sel = document.createElement("select");
+  HEADERS.forEach((h, i) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = colName(i);
+    if (i === value) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.addEventListener("change", () => onChange(+sel.value));
+  return sel;
+}
+function pickSelect(options, value, onChange){
+  const sel = document.createElement("select");
+  for (const [v, label] of options){
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label;
+    if (v === value) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.addEventListener("change", () => onChange(sel.value));
+  return sel;
+}
+
+function dateInfo(col){
+  if (!DATEFMT.has(col)){
+    const vals = new Array(ROWS.length);
+    for (let i = 0; i < ROWS.length; i++) vals[i] = ROWS[i][col];
+    DATEFMT.set(col, detectDateFormat(vals));
+  }
+  return DATEFMT.get(col);
+}
+
+function renderRules(){
+  const list = $("#ruleList"); list.innerHTML = "";
+  RULECFG.forEach((cfg, n) => {
+    const box = document.createElement("div");
+    box.className = "rule";
+
+    const top = document.createElement("div");
+    top.className = "rule-top";
+    const lvl = document.createElement("span");
+    lvl.className = "rule-lvl"; lvl.textContent = "LEVEL " + (n + 1);
+    top.appendChild(lvl);
+
+    top.appendChild(pickSelect(RULE_TYPES, cfg.type, v => {
+      RULECFG[n] = defaultCfg(v, cfg.col);
+      renderRules(); syncPick();
+    }));
+
+    if (cfg.type !== "complete"){
+      top.appendChild(colSelect(cfg.col, v => { cfg.col = v; renderRules(); syncPick(); }));
+    }
+    if (cfg.type === "date"){
+      top.appendChild(pickSelect([["1","Keep the latest"],["-1","Keep the earliest"]],
+        String(cfg.dir), v => { cfg.dir = +v; syncPick(); }));
+    }
+    if (cfg.type === "number"){
+      top.appendChild(pickSelect([["-1","Keep the lowest"],["1","Keep the highest"]],
+        String(cfg.dir), v => { cfg.dir = +v; syncPick(); }));
+    }
+    if (cfg.type === "complete"){
+      top.appendChild(pickSelect([["1","Keep the most complete"],["-1","Keep the least complete"]],
+        String(cfg.dir), v => { cfg.dir = +v; syncPick(); }));
+    }
+
+    const spacer = document.createElement("span");
+    spacer.className = "rule-spacer"; top.appendChild(spacer);
+
+    const up = document.createElement("button");
+    up.className = "rule-x"; up.type = "button"; up.textContent = "\u2191";
+    up.title = "Move this rule earlier"; up.disabled = n === 0;
+    up.addEventListener("click", () => {
+      RULECFG.splice(n - 1, 0, RULECFG.splice(n, 1)[0]); renderRules(); syncPick();
+    });
+    const dn = document.createElement("button");
+    dn.className = "rule-x"; dn.type = "button"; dn.textContent = "\u2193";
+    dn.title = "Move this rule later"; dn.disabled = n === RULECFG.length - 1;
+    dn.addEventListener("click", () => {
+      RULECFG.splice(n + 1, 0, RULECFG.splice(n, 1)[0]); renderRules(); syncPick();
+    });
+    const rm = document.createElement("button");
+    rm.className = "rule-x"; rm.type = "button"; rm.textContent = "\u00d7";
+    rm.title = "Remove this rule"; rm.disabled = RULECFG.length === 1;
+    rm.addEventListener("click", () => { RULECFG.splice(n, 1); renderRules(); syncPick(); });
+    top.appendChild(up); top.appendChild(dn); top.appendChild(rm);
+    box.appendChild(top);
+
+    if (cfg.type === "number") box.appendChild(numberCfgRow(cfg));
+    if (cfg.type === "date")   box.appendChild(dateCfgRow(cfg));
+    if (cfg.type === "complete") box.appendChild(completeCfgRow(cfg));
+
+    list.appendChild(box);
+  });
+  renderChain();
+}
+
+function defaultCfg(type, col){
+  const c = { type, col: col || 0, dir: +1 };
+  if (type === "number"){ c.dir = -1; c.prefixes = []; c.decimal = "us"; c.mode = "strict"; }
+  if (type === "complete"){ c.cols = []; }
+  return c;
+}
+
+function numberCfgRow(cfg){
+  const row = document.createElement("div");
+  row.className = "rule-cfg";
+
+  const pl = document.createElement("label");
+  pl.appendChild(document.createTextNode("Ignore prefix"));
+  const pin = document.createElement("input");
+  pin.type = "text"; pin.placeholder = "e.g. INV-  (comma-separated)";
+  pin.value = (cfg.prefixes || []).join(", ");
+  pin.addEventListener("input", () => {
+    cfg.prefixes = pin.value.split(",").map(s => s.trim()).filter(s => s.length);
+    syncPick();
+  });
+  pl.appendChild(pin); row.appendChild(pl);
+
+  row.appendChild(pickSelect([["us","1,234.56"],["eu","1.234,56"]], cfg.decimal || "us",
+    v => { cfg.decimal = v; syncPick(); }));
+  row.appendChild(pickSelect([["strict","Whole cell is the number"],["auto","Find the first number"]],
+    cfg.mode || "strict", v => { cfg.mode = v; syncPick(); }));
+
+  const al = document.createElement("label");
+  const ac = document.createElement("input");
+  ac.type = "checkbox"; ac.checked = !!cfg.accounting;
+  ac.addEventListener("change", () => { cfg.accounting = ac.checked; syncPick(); });
+  al.appendChild(ac); al.appendChild(document.createTextNode("(500) means \u2212500"));
+  row.appendChild(al);
+  return row;
+}
+
+function dateCfgRow(cfg){
+  const row = document.createElement("div");
+  row.className = "rule-cfg";
+  const info = dateInfo(cfg.col);
+
+  const OPTS = [["iso","2026-03-04"],["dmy","04/03/2026 \u2014 day first"],
+                ["mdy","03/04/2026 \u2014 month first"],["mon","4-Mar-2026"],
+                ["serial","Excel serial number"]];
+
+  if (info.status === "ok" && !cfg.format) cfg.format = info.format;
+  const lab = document.createElement("label");
+  lab.appendChild(document.createTextNode("Date format"));
+  lab.appendChild(pickSelect(OPTS, cfg.format || "", v => { cfg.format = v; renderRules(); syncPick(); }));
+  row.appendChild(lab);
+
+  const note = document.createElement("div");
+  note.className = "rule-note";
+  if (info.status === "ok"){
+    note.textContent = "Detected " + info.format.toUpperCase() + " from " + info.parsed +
+      " value" + (info.parsed === 1 ? "" : "s") +
+      (info.unparsed ? "; " + info.unparsed + " could not be read." : ".");
+  } else if (info.status === "ambiguous" && info.candidates.indexOf("serial") !== -1){
+    note.className = "rule-note bad";
+    note.textContent = "These look like plain numbers (e.g. " + info.sample +
+      "). If they are Excel dates, choose Excel serial number \u2014 the tool will not assume it.";
+  } else if (info.status === "ambiguous"){
+    note.className = "rule-note bad";
+    note.textContent = "Cannot tell day-first from month-first: nothing in this column is above 12 (e.g. " +
+      info.sample + "). Choose one \u2014 guessing would silently reorder your rows.";
+  } else if (info.status === "contradictory"){
+    note.className = "rule-note bad";
+    note.textContent = "This column contains both orders (e.g. " + info.sample +
+      "). It cannot be read as dates until the source data is fixed.";
+  } else {
+    note.className = "rule-note bad";
+    note.textContent = "No dates found in this column.";
+  }
+  row.appendChild(note);
+  return row;
+}
+
+function completeCfgRow(cfg){
+  const wrap = document.createElement("div");
+  const lab = document.createElement("div");
+  lab.className = "rule-note";
+  lab.textContent = "Count how many of these columns each row fills:";
+  wrap.appendChild(lab);
+  const cols = document.createElement("div");
+  cols.className = "rule-cols";
+  cfg.cols = cfg.cols || [];
+  HEADERS.forEach((h, i) => {
+    const b = document.createElement("div");
+    b.className = "chip" + (cfg.cols.indexOf(i) !== -1 ? " on" : "");
+    b.innerHTML = '<span class="ix">' + colLetter(i) + '</span>' + esc(h || "(unnamed " + (i+1) + ")");
+    b.addEventListener("click", () => {
+      const at = cfg.cols.indexOf(i);
+      if (at === -1) cfg.cols.push(i); else cfg.cols.splice(at, 1);
+      cfg.cols.sort((a, b2) => a - b2);
+      renderRules(); syncPick();
+    });
+    cols.appendChild(b);
+  });
+  wrap.appendChild(cols);
+  return wrap;
+}
+
+function renderChain(){
+  const parts = describeChain(RULECFG, shortColName);
+  const html = parts.map((p, i) => '<b>' + (i + 1) + '.</b> ' + esc(p)).join(' &nbsp;\u00b7&nbsp; ') +
+    ' &nbsp;\u00b7&nbsp; <span class="fall"><b>' + (parts.length + 1) +
+    '.</b> otherwise keep the last row in the file</span>';
+  $("#ruleChain").innerHTML = html;
+}
+
+$("#addRule").addEventListener("click", () => {
+  const used = new Set(RULECFG.map(c => c.col));
+  let col = 0;
+  for (let i = 0; i < HEADERS.length; i++) if (!used.has(i) && !keySet.has(i)){ col = i; break; }
+  RULECFG.push(defaultCfg("hasvalue", col));
+  renderRules(); syncPick();
+});
+
+/* What stops the run, and why. */
+function ruleProblems(){
+  const out = [];
+  RULECFG.forEach((c, n) => {
+    const at = "Level " + (n + 1) + ": ";
+    if (c.type === "complete" && (!c.cols || !c.cols.length))
+      out.push(at + "choose at least one column to count.");
+    if (c.type === "date"){
+      const info = dateInfo(c.col);
+      if (!c.format) out.push(at + "choose the date format for " + shortColName(c.col) + ".");
+      else if (info.status === "contradictory")
+        out.push(at + shortColName(c.col) + " mixes day-first and month-first dates.");
+    }
+  });
+  return out;
 }
 function colLetter(i){ let s = "", n = i + 1; while (n > 0){ const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = (n - 1 - m) / 26; } return s; }
 const PFX = new Map();
@@ -425,11 +702,16 @@ function currentNorm(){
   return makeNorm(PFX, { ci: $("#pfxCase").checked, trim: $("#pfxTrim").checked });
 }
 function syncPick(){
-  const tie = +$("#tieCol").value;
-  const clash = keySet.has(tie);
-  $("#pickCount").textContent = keySet.size + " match column" + (keySet.size === 1 ? "" : "s") + " selected" +
-    (clash ? " · tiebreak column is also a match column" : "");
-  $("#run").disabled = keySet.size === 0 || clash;
+  renderChain();
+  const problems = ruleProblems();
+  const overlap = RULECFG.filter(c => c.type !== "complete" && keySet.has(c.col)).length;
+  $("#pickCount").textContent = keySet.size + " match column" + (keySet.size === 1 ? "" : "s") +
+    " selected \u00b7 " + RULECFG.length + " rule" + (RULECFG.length === 1 ? "" : "s") +
+    (overlap ? " \u00b7 " + overlap + " rule" + (overlap === 1 ? " sits" : "s sit") + " on a match column" : "");
+  const err = $("#ruleErr");
+  if (problems.length){ err.hidden = false; err.textContent = problems.join("  "); }
+  else err.hidden = true;
+  $("#run").disabled = keySet.size === 0 || problems.length > 0;
   renderPrefixRows();
 }
 
@@ -757,6 +1039,32 @@ function makeDateRule(cellAt, n, col, opts){
   };
 }
 
+/* Turn the plain config objects the UI edits into live, scored rules. */
+function buildRules(cfgs, cellAt, n, wsBlank){
+  return cfgs.map(c => {
+    if (c.type === "date")     return makeDateRule(cellAt, n, c.col, c);
+    if (c.type === "number")   return makeNumberRule(cellAt, n, c.col, c);
+    if (c.type === "complete") return makeCompletenessRule(cellAt, n, c.cols || [],
+                                      { wsBlank: wsBlank, dir: c.dir });
+    return makeHasValueRule(cellAt, c.col, wsBlank);
+  });
+}
+
+/* One sentence describing what the chain will do, fallback included. */
+function describeChain(cfgs, nameOf){
+  const parts = cfgs.map(c => {
+    if (c.type === "date")
+      return "keep the " + (c.dir === -1 ? "earliest" : "latest") + " " + nameOf(c.col);
+    if (c.type === "number")
+      return "keep the " + (c.dir === -1 ? "lowest" : "highest") + " " + nameOf(c.col);
+    if (c.type === "complete")
+      return "keep the row filling the " + (c.dir === -1 ? "fewest" : "most") +
+             " of " + (c.cols || []).length + " column" + ((c.cols || []).length === 1 ? "" : "s");
+    return "keep a row that has a value in " + nameOf(c.col);
+  });
+  return parts;
+}
+
 /* Why this group resolved the way it did, in the deciding rule's own words. */
 function reasonFor(rules, trail, decidedBy){
   const say = (lvl, outcome) => {
@@ -836,7 +1144,9 @@ function collapseRows(o){
     if (prefixed[winner]) pfxSurvivor++;
     removed += idxs.length - 1;
     if (samples.length < sampleLimit){
-      samples.push({ k, idxs, winner, reason, tie,
+      const dr = pick.decidedBy !== null ? rules[pick.decidedBy] : null;
+      const showCol = dr && dr.col !== undefined && dr.col !== null ? dr.col : tie;
+      samples.push({ k, idxs, winner, reason, tie: showCol,
                      trail: pick.trail, decidedBy: pick.decidedBy,
                      pfx: idxs.map(i => !!prefixed[i]) });
     }
@@ -866,9 +1176,10 @@ $("#run").addEventListener("click", () => {
 
 function runCollapse(){
   const keys = [...keySet].sort((a,b) => a-b);
-  const tie = +$("#tieCol").value;
   const wsBlank = $("#wsBlank").checked;
   const cellAt = (i, c) => ROWS[i][c];
+  const rules = buildRules(RULECFG, cellAt, ROWS.length, wsBlank);
+  const tie = RULECFG.length && RULECFG[0].type !== "complete" ? RULECFG[0].col : null;
 
   const out = collapseRows({
     n: ROWS.length,
@@ -876,7 +1187,7 @@ function runCollapse(){
     keys,
     norm: currentNorm(),
     anyPfx: keys.some(c => PFX.has(c)),
-    rules: RULES.length ? RULES : [makeHasValueRule(cellAt, tie, wsBlank)],
+    rules,
     wsBlank,
     tie,
     sampleLimit: 30,
@@ -887,6 +1198,10 @@ function runCollapse(){
     gone: out.goneIdx.map(i => ROWS[i]),
     samples: out.samples, decidedAt: out.decidedAt,
     keys, tie, wsBlank, anyPfx: keys.some(c => PFX.has(c)),
+    rulecfg: RULECFG.map(c => Object.assign({}, c)),
+    unreadable: rules.map((r, i) => ({ level:i+1, type:r.type, col:r.col, n:r.unreadable || 0 }))
+                     .filter(x => x.n > 0),
+    chain: describeChain(RULECFG, shortColName),
     pfxMap: new Map([...PFX].filter(([c]) => keySet.has(c))),
     pfxTrim: $("#pfxTrim").checked, pfxCase: $("#pfxCase").checked,
     stats: out.stats
@@ -904,13 +1219,28 @@ function render(){
     ['drop', n(s.removed), 'Rows removed'],
     ['keep', n(s.rowsOut), 'Rows out'],
     ['', n(s.dupGroups), 'Colliding groups'],
-    [s.conflicts ? 'warn' : '', n(s.conflicts), 'Tiebreak overrode order'],
+    [s.conflicts ? 'warn' : '', n(s.conflicts), 'Rules overrode order'],
     [s.nearMiss ? 'warn' : '', n(s.nearMiss), 'Near-miss keys']
   ];
   if (RESULT.anyPfx) cards.splice(4, 0, ['warn', n(s.pfxMerged), 'Groups joined by prefix']);
   $("#stats").innerHTML = cards.map(([c,v,l]) => '<div class="stat ' + c + '"><div class="n">' + v + '</div><div class="l">' + l + '</div></div>').join("");
 
+  const att = RESULT.decidedAt.map((cnt, i) => {
+    if (!cnt) return null;
+    const name = i < RESULT.chain.length ? "<b>" + (i + 1) + ".</b> " + esc(RESULT.chain[i])
+                                         : '<span class="fall"><b>' + (i + 1) + '.</b> last row in the file</span>';
+    return name + " \u2192 " + n(cnt) + " group" + (cnt === 1 ? "" : "s");
+  }).filter(Boolean);
+  $("#attrib").innerHTML = RESULT.stats.dupGroups
+    ? "Which rule decided each collision: &nbsp;" + att.join(" &nbsp;\u00b7&nbsp; ")
+    : "No collisions, so no rule had to decide anything.";
+
   const h = [];
+  for (const u of RESULT.unreadable){
+    h.push('Level <b>' + u.level + '</b> could not read <b>' + n(u.n) + ' cell' + (u.n === 1 ? '' : 's') +
+           '</b> in ' + esc(HEADERS[u.col] || colLetter(u.col)) +
+           '. Those rows were passed over by that rule rather than scored as zero.');
+  }
   if (RESULT.anyPfx){
     h.push('A prefix was cut off <b>' + n(s.stripped) + ' times</b> before comparing. <b>' + n(s.pfxMerged) + ' groups</b> exist only because of it — without the prefix rule those rows would have stayed separate.');
     if (s.pfxSurvivor) h.push('In <b>' + n(s.pfxSurvivor) + ' groups</b> the surviving row is one that carries the prefix, so the prefix stays in the cleaned output. The prefix is only ignored for comparison, never rewritten.');
@@ -934,7 +1264,7 @@ function render(){
         .map((v,i) => '<span class="mono">' + esc(HEADERS[RESULT.keys[i]] || colLetter(RESULT.keys[i])) + '</span> = ' + (v.length ? esc(v) : '<span class="empty6">empty</span>'))
         .join(' &nbsp;·&nbsp; ');
       const rows = g.idxs.map((i, j) => {
-        const v = ROWS[i][g.tie];
+        const v = (g.tie === null || g.tie === undefined) ? "" : ROWS[i][g.tie];
         const on = i === g.winner;
         return '<div class="row ' + (on ? 'kept' : 'gone') + '">' +
           '<span class="mark"></span>' +
@@ -988,7 +1318,10 @@ $("#dlSummary").addEventListener("click", () => {
   L.push("");
   L.push("RULE APPLIED");
   L.push("  match columns ........... " + RESULT.keys.map(i => colLetter(i) + " " + (HEADERS[i] || "(unnamed)")).join(" | "));
-  L.push("  tiebreak column ......... " + colLetter(RESULT.tie) + " " + (HEADERS[RESULT.tie] || "(unnamed)"));
+  RESULT.chain.forEach((line, i) => {
+    L.push("  rule " + (i + 1) + " .................. " + line);
+  });
+  L.push("  rule " + (RESULT.chain.length + 1) + " .................. otherwise keep the last row in the file");
   L.push("  comparison .............. exact, case and whitespace sensitive");
   if (RESULT.anyPfx){
     for (const [c, p] of RESULT.pfxMap)
@@ -998,8 +1331,8 @@ $("#dlSummary").addEventListener("click", () => {
   } else {
     L.push("  prefixes ignored ........ none");
   }
-  L.push("  survivor ................ last row carrying a tiebreak value; otherwise last row in file order");
-  L.push("  spaces-only tiebreak .... treated as " + (RESULT.wsBlank ? "empty" : "a value"));
+  L.push("  survivor ................ first rule above that separates the rows; ties fall to the next");
+  L.push("  spaces-only cells ....... treated as " + (RESULT.wsBlank ? "empty" : "a value"));
   L.push("");
   L.push("RESULT");
   L.push("  distinct keys ........... " + s.groups);
@@ -1020,7 +1353,13 @@ $("#dlSummary").addEventListener("click", () => {
   }
   L.push("  cells with edge spaces .. " + s.edgeSpace);
   L.push("  cells in sci notation ... " + s.sci);
-  L.push("  spaces-only tiebreak .... " + s.wsOnly);
+  L.push("  spaces-only cells ....... " + s.wsOnly);
+  L.push("");
+  L.push("WHICH RULE DECIDED");
+  RESULT.decidedAt.forEach((n, i) => {
+    const name = i < RESULT.chain.length ? "rule " + (i + 1) : "file order";
+    L.push("  " + (name + " ").padEnd(24, ".") + " " + n + " group" + (n === 1 ? "" : "s"));
+  });
   saveBlob(new Blob([L.join("\r\n")], { type:"text/plain;charset=utf-8" }), SRCNAME + "_run_summary.txt");
 });
 </script>
