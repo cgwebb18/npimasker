@@ -258,10 +258,11 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
-const NUL = "\u0000";
 let HEADERS = [], ROWS = [], SRCNAME = "data", SRCKIND = "xlsx", RESULT = null;
+let RULES = [];   // ordered survivor rules; empty means "use the tiebreak column"
 
 /* ---------- strict CSV parsing (no type coercion, RFC4180 quoting) ---------- */
+/* ==== csv:begin ==== */
 function sniffDelim(text){
   const line = text.slice(0, 8000).split(/\r?\n/)[0] || "";
   let best = ",", bestN = -1;
@@ -306,6 +307,7 @@ function toCSV(headers, rows){
   for (const r of rows) lines.push(r.map(csvCell).join(","));
   return "\uFEFF" + lines.join("\r\n");
 }
+/* ==== csv:end ==== */
 
 /* ---------- loading ---------- */
 const drop = $("#drop"), fileInput = $("#file");
@@ -419,17 +421,8 @@ $("#pfxApply").addEventListener("click", () => {
   for (const c of keySet){ if (v.length) PFX.set(c, v); else PFX.delete(c); }
   renderPrefixRows();
 });
-function makeNorm(){
-  const ci = $("#pfxCase").checked, tr = $("#pfxTrim").checked;
-  return (v, c) => {
-    const p = PFX.get(c);
-    if (!p || v.length < p.length) return v;
-    const head = v.slice(0, p.length);
-    if (ci ? head.toLowerCase() !== p.toLowerCase() : head !== p) return v;
-    let out = v.slice(p.length);
-    if (tr) out = out.replace(/^[ \t]+/, "");
-    return out;
-  };
+function currentNorm(){
+  return makeNorm(PFX, { ci: $("#pfxCase").checked, trim: $("#pfxTrim").checked });
 }
 function syncPick(){
   const tie = +$("#tieCol").value;
@@ -439,6 +432,195 @@ function syncPick(){
   $("#run").disabled = keySet.size === 0 || clash;
   renderPrefixRows();
 }
+
+/* ---------- survivor rules ----------
+
+   An ordered chain of rules decides which row of a collision group survives.
+   Each level keeps only the candidates tied at its best score; if one is left
+   it wins, otherwise the next level runs on just those. When the rules are
+   spent, the last row in file order wins — the same fallback the tool has
+   always used, and what guarantees a winner exists at all.
+
+   Everything between the markers below is pure: no DOM, no globals, no I/O.
+   dedupPOC/tests/ slices this block straight out of this file and runs it, so
+   the tested code and the shipped code cannot drift apart. Keep it that way.
+*/
+/* ==== rules:begin ==== */
+
+const NUL = "\u0000";   // key separator; never occurs in spreadsheet text
+
+/* Cut a declared prefix off a value before it is compared. The prefix is only
+   ignored for comparison — it is never rewritten in the data. */
+function makeNorm(pfxMap, opts){
+  const ci = !!(opts && opts.ci), tr = !!(opts && opts.trim);
+  return (v, c) => {
+    const p = pfxMap.get(c);
+    if (!p || v.length < p.length) return v;
+    const head = v.slice(0, p.length);
+    if (ci ? head.toLowerCase() !== p.toLowerCase() : head !== p) return v;
+    let out = v.slice(p.length);
+    if (tr) out = out.replace(/^[ \t]+/, "");
+    return out;
+  };
+}
+
+/* A rule is { type, dir, score(rowIndex) }.
+   score returns a number, or null meaning "this row has no usable value here".
+   dir is +1 to keep the highest score, -1 to keep the lowest. */
+
+function pickWinner(idxs, rules){
+  let cand = idxs, decidedBy = null;
+  const trail = [];
+
+  for (let L = 0; L < rules.length && cand.length > 1; L++){
+    const rule = rules[L];
+    const scored = [];
+    for (const i of cand){
+      const s = rule.score(i);
+      if (s !== null && s !== undefined && s === s) scored.push([i, s]);
+    }
+    if (!scored.length){
+      // Nobody has a usable value, so this level cannot discriminate. Skipping
+      // is deliberate: it must not eliminate the whole field.
+      trail.push({ level:L, outcome:"skipped", from:cand.length, to:cand.length });
+      continue;
+    }
+    let best = scored[0][1];
+    for (let n = 1; n < scored.length; n++){
+      const s = scored[n][1];
+      if (rule.dir > 0 ? s > best : s < best) best = s;
+    }
+    const next = [];
+    for (const [i, s] of scored) if (s === best) next.push(i);
+
+    const narrowed = next.length < cand.length;
+    trail.push({ level:L, outcome: narrowed ? "narrowed" : "tied",
+                 from: cand.length, to: next.length, best });
+    if (narrowed) decidedBy = L;
+    cand = next;   // only ever shrinks, so file order is preserved throughout
+  }
+
+  return { winner: cand[cand.length - 1], trail, decidedBy };
+}
+
+/* cellAt(rowIndex, col) -> string. Injected so the rules stay testable
+   without a page, and so the page can hand them ROWS directly. */
+
+function makeHasValueRule(cellAt, col, wsBlank){
+  return {
+    type: "hasvalue", dir: +1, col,
+    score(i){
+      const v = cellAt(i, col);
+      return (wsBlank ? v.trim().length : v.length) > 0 ? 1 : null;
+    },
+    reason(outcome){
+      if (outcome === "narrowed") return "Kept the last row that carries a tiebreak value.";
+      if (outcome === "tied") return "All rows carry a tiebreak value — last one in the file wins.";
+      return "No row carries a tiebreak value — last one in the file wins.";
+    }
+  };
+}
+
+/* Why this group resolved the way it did, in the deciding rule's own words. */
+function reasonFor(rules, trail, decidedBy){
+  const say = (lvl, outcome) => {
+    const r = rules[lvl];
+    return r && r.reason ? r.reason(outcome)
+                         : "Level " + (lvl + 1) + " decided it.";
+  };
+  if (decidedBy !== null) return say(decidedBy, "narrowed");
+  const tied = trail.find(t => t.outcome === "tied");
+  if (tied) return say(tied.level, "tied");
+  if (trail.length) return say(trail[trail.length - 1].level, "skipped");
+  return "No rules configured — last row in the file wins.";
+}
+
+/* The whole collapse, with no DOM in sight: group the rows, pick a survivor in
+   each colliding group, and count everything the result panel reports. */
+function collapseRows(o){
+  const n = o.n, cellAt = o.cellAt, keys = o.keys, norm = o.norm;
+  const rules = o.rules || [], tie = o.tie, sampleLimit = o.sampleLimit || 30;
+  const anyPfx = !!o.anyPfx;
+
+  const groups = new Map();   // compared key -> array of row indices
+  const loose  = new Map();   // trimmed+casefolded key -> Set of compared keys
+  const prefixed = new Uint8Array(n);
+  let wsOnly = 0, sci = 0, edgeSpace = 0, stripped = 0, emptiedByStrip = 0;
+
+  for (let i = 0; i < n; i++){
+    let k = "", lk = "";
+    for (const c of keys){
+      const raw = cellAt(i, c);
+      const v = norm(raw, c);
+      if (v !== raw){
+        stripped++; prefixed[i] = 1;
+        if (!v.length) emptiedByStrip++;
+      }
+      k += v + NUL;
+      lk += v.trim().toLowerCase().replace(/\s+/g, " ") + NUL;
+      if (v.length !== v.trim().length) edgeSpace++;
+      if (/^-?\d+(\.\d+)?E[+-]\d+$/i.test(v)) sci++;
+    }
+    if (tie !== null && tie !== undefined){
+      const t = cellAt(i, tie);
+      if (t.length && !t.trim().length) wsOnly++;
+    }
+    let g = groups.get(k);
+    if (!g){ g = []; groups.set(k, g); }
+    g.push(i);
+    let s = loose.get(lk);
+    if (!s){ s = new Set(); loose.set(lk, s); }
+    s.add(k);
+  }
+
+  const keepFlag = new Uint8Array(n);
+  let dupGroups = 0, removed = 0, conflicts = 0, allBlankGroups = 0;
+  let pfxMerged = 0, pfxSurvivor = 0;
+  const samples = [];
+  const decidedAt = new Array(rules.length + 1).fill(0);  // last slot = file order
+  const rawKey = i => { let s = ""; for (const c of keys) s += cellAt(i, c) + NUL; return s; };
+
+  for (const [k, idxs] of groups){
+    if (idxs.length === 1){ keepFlag[idxs[0]] = 1; continue; }
+    dupGroups++;
+    if (anyPfx){
+      const first = rawKey(idxs[0]);
+      if (idxs.some(i => rawKey(i) !== first)) pfxMerged++;
+    }
+
+    const pick = pickWinner(idxs, rules);
+    const winner = pick.winner;
+    const reason = reasonFor(rules, pick.trail, pick.decidedBy);
+
+    decidedAt[pick.decidedBy === null ? rules.length : pick.decidedBy]++;
+    if (pick.trail.length && pick.trail.every(t => t.outcome === "skipped")) allBlankGroups++;
+    if (winner !== idxs[idxs.length - 1]) conflicts++;
+
+    keepFlag[winner] = 1;
+    if (prefixed[winner]) pfxSurvivor++;
+    removed += idxs.length - 1;
+    if (samples.length < sampleLimit){
+      samples.push({ k, idxs, winner, reason, tie,
+                     trail: pick.trail, decidedBy: pick.decidedBy,
+                     pfx: idxs.map(i => !!prefixed[i]) });
+    }
+  }
+
+  let nearMiss = 0;
+  for (const s of loose.values()) if (s.size > 1) nearMiss += s.size;
+
+  const keptIdx = [], goneIdx = [];
+  for (let i = 0; i < n; i++) (keepFlag[i] ? keptIdx : goneIdx).push(i);
+
+  return {
+    keptIdx, goneIdx, samples, decidedAt,
+    stats: { rowsIn:n, groups:groups.size, dupGroups, removed, rowsOut:keptIdx.length,
+             conflicts, allBlankGroups, nearMiss, wsOnly, edgeSpace, sci,
+             stripped, emptiedByStrip, pfxMerged, pfxSurvivor }
+  };
+}
+
+/* ==== rules:end ==== */
 
 /* ---------- the collapse ---------- */
 $("#run").addEventListener("click", () => {
@@ -450,88 +632,28 @@ function runCollapse(){
   const keys = [...keySet].sort((a,b) => a-b);
   const tie = +$("#tieCol").value;
   const wsBlank = $("#wsBlank").checked;
-  const hasVal = v => (wsBlank ? v.trim().length : v.length) > 0;
+  const cellAt = (i, c) => ROWS[i][c];
 
-  const norm = makeNorm();
-  const anyPfx = keys.some(c => PFX.has(c));
-
-  const groups = new Map();   // compared key -> array of row indices
-  const loose  = new Map();   // trimmed+casefolded key -> Set of compared keys
-  const prefixed = new Uint8Array(ROWS.length);
-  let wsOnly = 0, sci = 0, edgeSpace = 0, stripped = 0, emptiedByStrip = 0;
-
-  for (let i=0;i<ROWS.length;i++){
-    const r = ROWS[i];
-    let k = "", lk = "";
-    for (const c of keys){
-      const raw = r[c];
-      const v = norm(raw, c);
-      if (v !== raw){
-        stripped++; prefixed[i] = 1;
-        if (!v.length) emptiedByStrip++;
-      }
-      k += v + NUL;
-      lk += v.trim().toLowerCase().replace(/\s+/g," ") + NUL;
-      if (v.length !== v.trim().length) edgeSpace++;
-      if (/^-?\d+(\.\d+)?E[+-]\d+$/i.test(v)) sci++;
-    }
-    const t = r[tie];
-    if (t.length && !t.trim().length) wsOnly++;
-    let g = groups.get(k);
-    if (!g){ g = []; groups.set(k, g); }
-    g.push(i);
-    let s = loose.get(lk);
-    if (!s){ s = new Set(); loose.set(lk, s); }
-    s.add(k);
-  }
-
-  say("Deciding survivors…", 70);
-
-  const keepFlag = new Uint8Array(ROWS.length);
-  let dupGroups = 0, removed = 0, conflicts = 0, allBlankGroups = 0;
-  let pfxMerged = 0, pfxSurvivor = 0;
-  const samples = [];
-  const rawKey = i => { let s = ""; for (const c of keys) s += ROWS[i][c] + NUL; return s; };
-
-  for (const [k, idxs] of groups){
-    if (idxs.length === 1){ keepFlag[idxs[0]] = 1; continue; }
-    dupGroups++;
-    if (anyPfx){
-      const first = rawKey(idxs[0]);
-      if (idxs.some(i => rawKey(i) !== first)) pfxMerged++;
-    }
-    const withVal = idxs.filter(i => hasVal(ROWS[i][tie]));
-    let winner, reason;
-    if (withVal.length){
-      winner = withVal[withVal.length - 1];
-      reason = withVal.length === idxs.length
-        ? "All rows carry a tiebreak value — last one in the file wins."
-        : "Kept the last row that carries a tiebreak value.";
-      if (winner !== idxs[idxs.length - 1]) conflicts++;
-    } else {
-      winner = idxs[idxs.length - 1];
-      reason = "No row carries a tiebreak value — last one in the file wins.";
-      allBlankGroups++;
-    }
-    keepFlag[winner] = 1;
-    if (prefixed[winner]) pfxSurvivor++;
-    removed += idxs.length - 1;
-    if (samples.length < 30) samples.push({ k, idxs, winner, reason, tie, pfx: idxs.map(i => !!prefixed[i]) });
-  }
-
-  let nearMiss = 0;
-  for (const s of loose.values()) if (s.size > 1) nearMiss += s.size;
-
-  const kept = [], gone = [];
-  for (let i=0;i<ROWS.length;i++) (keepFlag[i] ? kept : gone).push(ROWS[i]);
+  const out = collapseRows({
+    n: ROWS.length,
+    cellAt,
+    keys,
+    norm: currentNorm(),
+    anyPfx: keys.some(c => PFX.has(c)),
+    rules: RULES.length ? RULES : [makeHasValueRule(cellAt, tie, wsBlank)],
+    wsBlank,
+    tie,
+    sampleLimit: 30,
+  });
 
   RESULT = {
-    kept, gone, samples, keys, tie, wsBlank, anyPfx,
+    kept: out.keptIdx.map(i => ROWS[i]),
+    gone: out.goneIdx.map(i => ROWS[i]),
+    samples: out.samples, decidedAt: out.decidedAt,
+    keys, tie, wsBlank, anyPfx: keys.some(c => PFX.has(c)),
     pfxMap: new Map([...PFX].filter(([c]) => keySet.has(c))),
     pfxTrim: $("#pfxTrim").checked, pfxCase: $("#pfxCase").checked,
-    stats:{ rowsIn:ROWS.length, groups:groups.size, dupGroups, removed, rowsOut:kept.length,
-            conflicts, allBlankGroups, nearMiss, wsOnly, edgeSpace, sci,
-            stripped, emptiedByStrip, pfxMerged, pfxSurvivor }
+    stats: out.stats
   };
   $("#progress").hidden = true;
   render();
