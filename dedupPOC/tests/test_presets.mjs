@@ -146,3 +146,98 @@ test("the label falls back to something usable when absent", () => {
   const p = P.parsePreset(JSON.stringify({ version:1, match:["Client ID"], rules:[] }));
   assert.ok(p.label && p.label.length, "a nameless preset is still listable");
 });
+
+/* ---------- deliberately-unset columns ----------
+
+   A built-in preset cannot know every site's column names, so it marks the
+   ones a person must choose with a __PICK_…__ placeholder. That is a third
+   state, distinct from "the column is missing": missing means something went
+   wrong, pending means the preset is working as written and is waiting.
+*/
+
+test("a placeholder is reported as pending, not as missing", () => {
+  const b = P.fromPreset({
+    version:1, label:"Casenotes", match:["Client ID"], prefix:{},
+    rules:[{ type:"minmax", parse:"date", dir:"min", field:"__PICK_LAST_DATE__", on:true }],
+  }, HEADERS);
+  assert.equal(b.missing.length, 0, "nothing is wrong with this preset");
+  assert.equal(b.pending.length, 1);
+  assert.equal(b.pending[0].placeholder, "__PICK_LAST_DATE__");
+  assert.equal(b.pending[0].level, 1);
+});
+
+test("a pending criterion stays on, so the user is asked rather than ignored", () => {
+  const b = P.fromPreset({
+    version:1, label:"x", match:["Client ID"], prefix:{},
+    rules:[{ type:"minmax", parse:"date", dir:"min", field:"__PICK_LAST_DATE__", on:true }],
+  }, HEADERS);
+  assert.equal(b.rules[0].on, true, "unlike a missing column, this is not switched off");
+  assert.equal(b.rules[0].field, null, "and it points at nothing until chosen");
+  assert.equal(b.rules[0].needs, "__PICK_LAST_DATE__");
+});
+
+test("a placeholder in a match column is pending too", () => {
+  const b = P.fromPreset({
+    version:1, label:"x", match:["Client ID", "__PICK_SERVICE_COMBINED__"], prefix:{}, rules:[],
+  }, HEADERS);
+  assert.deepEqual([...b.match], [0], "only the real one is selected");
+  assert.equal(b.pending.length, 1);
+  assert.equal(b.pending[0].where, "match");
+});
+
+test("a placeholder among counted columns keeps the rest and asks for the one", () => {
+  const b = P.fromPreset({
+    version:1, label:"x", match:["Client ID"], prefix:{},
+    rules:[{ type:"count", dir:"max", fields:["Case Note", "__PICK_EMPLOYMENT__", "NoteWriter"],
+             counts:"above-zero", on:true }],
+  }, HEADERS);
+  assert.deepEqual(b.rules[0].fields, [2, 3]);
+  assert.equal(b.rules[0].on, true);
+  assert.equal(b.pending.length, 1);
+});
+
+test("a placeholder that happens to name a real column binds to it", () => {
+  // If a site really does have a column called __PICK_LAST_DATE__, use it.
+  const odd = HEADERS.concat(["__PICK_LAST_DATE__"]);
+  const b = P.fromPreset({
+    version:1, label:"x", match:[], prefix:{},
+    rules:[{ type:"minmax", parse:"date", dir:"min", field:"__PICK_LAST_DATE__", on:true }],
+  }, odd);
+  assert.equal(b.pending.length, 0);
+  assert.equal(b.rules[0].field, 5);
+});
+
+test("saving a setup with an unchosen column writes the placeholder back", () => {
+  const s = { match:new Set([0]), prefix:new Map(),
+              rules:[{ type:"minmax", parse:"date", dir:"min", field:null,
+                       needs:"__PICK_LAST_DATE__", on:true }] };
+  const p = P.toPreset("Casenotes", HEADERS, s);
+  assert.equal(p.rules[0].field, "__PICK_LAST_DATE__",
+    "so the preset stays reusable instead of freezing one site's choice");
+  assert.equal(p.rules[0].needs, undefined, "the marker lives in field, not beside it");
+});
+
+test("missing and pending are counted separately", () => {
+  const b = P.fromPreset({
+    version:1, label:"x", match:["Client ID"], prefix:{},
+    rules:[
+      { type:"minmax", parse:"date", dir:"min", field:"__PICK_LAST_DATE__", on:true },
+      { type:"minmax", parse:"number", dir:"min", field:"Gone Away", on:true },
+    ],
+  }, HEADERS);
+  assert.equal(b.pending.length, 1);
+  assert.equal(b.missing.length, 1);
+  assert.equal(b.rules[0].on, true, "pending: still asking");
+  assert.equal(b.rules[1].on, false, "missing: switched off");
+});
+
+/* ---------- the built-in datasets ---------- */
+
+test("every built-in preset is a valid preset", () => {
+  // They go through the same door as a file loaded from disk.
+  for (const p of P.BUILTIN_PRESETS || []){
+    const back = P.parsePreset(JSON.stringify(p));
+    assert.ok(back.label.length);
+    assert.ok(Array.isArray(back.rules));
+  }
+});

@@ -650,6 +650,11 @@ function shortColName(i){ return headerLabel(HEADERS, i); }
 
 function colSelect(value, onChange){
   const sel = document.createElement("select");
+  if (value === null || value === undefined){
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "— choose a column —"; o.selected = true;
+    sel.appendChild(o);
+  }
   HEADERS.forEach((h, i) => {
     const o = document.createElement("option");
     o.value = i; o.textContent = colName(i);
@@ -698,7 +703,9 @@ function renderRules(){
     }));
 
     if (cfg.type !== "count"){
-      top.appendChild(colSelect(cfg.field, v => { cfg.field = v; renderRules(); syncPick(); }));
+      top.appendChild(colSelect(cfg.field, v => {
+        cfg.field = v; delete cfg.needs; renderRules(); syncPick();
+      }));
     }
     const DIRS = {
       "minmax:date":  [["min","Keep the oldest"],["max","Keep the newest"]],
@@ -740,6 +747,13 @@ function renderRules(){
     top.appendChild(up); top.appendChild(dn); top.appendChild(rm);
     box.appendChild(top);
 
+    if (cfg.needs || cfg.field === null){
+      const ask = document.createElement("div");
+      ask.className = "rule-note bad";
+      ask.textContent = "This preset leaves the column to you \u2014 pick it above. " +
+                        "(" + cfg.needs + ")";
+      box.appendChild(ask);
+    }
     if (cfg.type === "minmax" && cfg.parse === "number") box.appendChild(numberCfgRow(cfg));
     if (cfg.type === "minmax" && cfg.parse === "date")   box.appendChild(dateCfgRow(cfg));
     if (cfg.type === "minmax" && cfg.parse === "text")   box.appendChild(stripCfgRow(cfg));
@@ -813,7 +827,7 @@ function dateCfgRow(cfg){
 
   const OPTS = [["ISO","2026-03-04"],["DMY","04/03/2026 \u2014 day first"],
                 ["MDY","03/04/2026 \u2014 month first"],["MON","4-Mar-2026"],
-                ["SERIAL","Excel serial number"]];
+                ["YMD8","20260304"],["SERIAL","Excel serial number"]];
 
   if (info.status === "ok" && !cfg.fmt) cfg.fmt = FMT_NAME[info.format] || info.format;
   const lab = document.createElement("label");
@@ -933,6 +947,7 @@ function drawPresetPicker(){
     sel.appendChild(o);
   };
   add("", "Custom — set everything by hand");
+  BUILTIN_PRESETS.forEach((p, i) => add("built:" + i, p.label));
   SAVED.forEach((p, i) => add("saved:" + i, p.label));
   $("#presetForget").hidden = !(CURRENT_PRESET || "").startsWith("saved:");
   const note = $("#presetNote");
@@ -940,8 +955,10 @@ function drawPresetPicker(){
   note.textContent = cur && cur.note ? cur.note : "";
 }
 function currentPresetObj(){
-  if (!(CURRENT_PRESET || "").startsWith("saved:")) return null;
-  return SAVED[+CURRENT_PRESET.slice(6)] || null;
+  const v = CURRENT_PRESET || "";
+  if (v.startsWith("built:")) return BUILTIN_PRESETS[+v.slice(6)] || null;
+  if (v.startsWith("saved:")) return SAVED[+v.slice(6)] || null;
+  return null;
 }
 
 /* Put a preset's settings on screen, saying plainly what did not bind. */
@@ -958,13 +975,19 @@ function applyPreset(preset){
   renderRules();
   syncPick();
 
+  const say = [];
+  if (bound.pending.length){
+    say.push("This preset leaves " + bound.pending.length + " column" +
+      (bound.pending.length === 1 ? "" : "s") + " for you to choose" +
+      (bound.note ? " — " + bound.note : "") + ".");
+  }
   if (bound.missing.length){
     const names = bound.missing.map(m => '"' + m.name + '"');
-    presetWarn("These settings mention " + bound.missing.length + " column" +
+    say.push("It also mentions " + bound.missing.length + " column" +
       (bound.missing.length === 1 ? "" : "s") + " this file does not have: " +
-      names.join(", ") + ". Any criterion left without its column has been switched off — " +
-      "check the setup before running.");
-  } else presetWarn("");
+      names.join(", ") + ". Any criterion left without its column has been switched off.");
+  }
+  presetWarn(say.join(" "));
 }
 
 $("#presetPick").addEventListener("change", () => {
@@ -1044,6 +1067,10 @@ function ruleProblems(){
   RULECFG.forEach((c, n) => {
     const at = "Level " + (n + 1) + ": ";
     if (!ruleIsOn(c)) return;                     // switched off; nothing to validate
+    if (c.needs || c.field === null){
+      out.push(at + "choose the column this preset left for you (" + c.needs + ").");
+      return;
+    }
     if (c.type === "count" && (!c.fields || !c.fields.length))
       out.push(at + "choose at least one column to count.");
     if (c.type === "minmax" && c.parse === "date"){
@@ -1124,9 +1151,73 @@ function syncPick(){
 
 const PRESET_VERSION = 1;
 
+/* The datasets this tool was built for. A preset cannot know every site's
+   column names, so the ones a person must choose are marked __PICK_…__ and the
+   note says which. Written in the same shape as a saved preset, so built-in
+   and saved settings are the same kind of thing. */
+const BUILTIN_PRESETS = [
+  {
+    version: PRESET_VERSION,
+    label: "Casenotes",
+    note: "Oldest casenote first; if still tied, the lowest casenote number. The date column is not set — choose Last Modified Date or Last Activity Date.",
+    match: ["Client ID: HMIS ID", "Entry Date", "Case Note", "NoteWriter"],
+    prefix: { "Case Note": "" },
+    rules: [
+      { type:"minmax", parse:"date", dir:"min", field:"__PICK_LAST_DATE__", on:true },
+      { type:"minmax", parse:"number", dir:"min", field:"Casenote: Casenotes",
+        strip:"digits", on:true }
+    ]
+  },
+  {
+    version: PRESET_VERSION,
+    label: "Assessments",
+    note: "Most fields above zero; then the oldest record; then the lowest assessment ID. The employment column is not set — pick it by hand.",
+    match: ["Client ID: HMIS ID", "Assessment Date", "Assessment Type", "Assessor"],
+    prefix: {},
+    rules: [
+      { type:"count", dir:"max", counts:"above-zero", on:true,
+        fields:["Disabled", "DV Experience", "__PICK_EMPLOYMENT__", "Health Insurance",
+                "Length of Stay", "Living Situation", "Monthly Expenses"] },
+      { type:"minmax", parse:"date", dir:"min", field:"Assessment Date", on:true },
+      { type:"minmax", parse:"number", dir:"min", strip:"digits", on:true,
+        field:"Assessment: HMIS Assessment ID (yyyymmdd)" }
+    ]
+  },
+  {
+    version: PRESET_VERSION,
+    label: "HMIS Services",
+    note: "Oldest created date; if still tied, the oldest last-modified date. No column is named Service Combined — add the right one by hand.",
+    match: ["Client ID: HMIS ID", "Service Date", "__PICK_SERVICE_COMBINED__", "Created by User"],
+    prefix: {},
+    rules: [
+      { type:"minmax", parse:"date", dir:"min", field:"HMIS Service: Created Date", on:true },
+      { type:"minmax", parse:"date", dir:"min", field:"HMIS Service: Last Modified Date", on:true }
+    ]
+  },
+  {
+    version: PRESET_VERSION,
+    label: "HRM Services",
+    note: "Oldest created date; if still tied, the oldest last-modified date.",
+    match: ["Client ID: HMIS ID", "Service Date", "Office Visit", "Comments"],
+    prefix: {},
+    rules: [
+      { type:"minmax", parse:"date", dir:"min", field:"HRM Service: Created Date", on:true },
+      { type:"minmax", parse:"date", dir:"min", field:"HRM Service: Last Modified Date", on:true }
+    ]
+  }
+];
+
+
 /* Compare header names the way people retype them: case, spacing and
    punctuation drift, the words do not. */
 function normName(s){ return String(s == null ? "" : s).toLowerCase().replace(/[^a-z0-9]/g, ""); }
+
+/* A built-in preset cannot know every site's column names, so it marks the ones
+   a person must choose with a __PICK_…__ placeholder. That is a third state,
+   not a fourth kind of error: "missing" means something went wrong, "pending"
+   means the preset is working as written and is waiting to be told. */
+const PLACEHOLDER = /^__PICK_[A-Z0-9_]*__$/;
+function isPlaceholder(n){ return PLACEHOLDER.test(String(n == null ? "" : n)); }
 
 function toPreset(label, headers, settings){
   const name = i => String(headers[i] == null ? "" : headers[i]);
@@ -1140,8 +1231,16 @@ function toPreset(label, headers, settings){
     prefix: prefix,
     rules: settings.rules.map(r => {
       const o = Object.assign({}, r);
-      if (o.type === "count") o.fields = (r.fields || []).map(name);
-      else o.field = name(r.field);
+      if (o.type === "count"){
+        o.fields = (r.fields || []).map(c => (c === null || c === undefined) ? null : name(c))
+                                   .filter(x => x !== null);
+        if (r.needs) o.fields = o.fields.concat([r.needs]);
+      } else {
+        // An unchosen column is written back as its placeholder, so the preset
+        // stays reusable instead of freezing one site's choice.
+        o.field = (r.field === null || r.field === undefined) ? (r.needs || "") : name(r.field);
+      }
+      delete o.needs;
       o.on = r.on !== false;
       return o;
     })
@@ -1168,18 +1267,26 @@ function fromPreset(preset, headers){
   headers.forEach((h, i) => { const k = normName(h); if (!index.has(k)) index.set(k, i); });
   const find = n => { const i = index.get(normName(n)); return i === undefined ? null : i; };
 
-  const missing = [];
+  const missing = [], pending = [];
+  // A placeholder that happens to name a real column is just that column.
+  const classify = n => {
+    const i = find(n);
+    if (i !== null) return { i };
+    return isPlaceholder(n) ? { pending:true } : { missing:true };
+  };
+
   const match = new Set();
   for (const n of preset.match){
-    const i = find(n);
-    if (i === null) missing.push({ where:"match", name:n });
-    else match.add(i);
+    const c = classify(n);
+    if (c.i !== undefined) match.add(c.i);
+    else if (c.pending) pending.push({ where:"match", placeholder:n });
+    else missing.push({ where:"match", name:n });
   }
   const prefix = new Map();
   for (const n of Object.keys(preset.prefix || {})){
-    const i = find(n);
-    if (i === null) missing.push({ where:"prefix", name:n });
-    else prefix.set(i, preset.prefix[n]);
+    const c = classify(n);
+    if (c.i !== undefined) prefix.set(c.i, preset.prefix[n]);
+    else if (!c.pending) missing.push({ where:"prefix", name:n });
   }
 
   const rules = preset.rules.map((r, n) => {
@@ -1187,24 +1294,31 @@ function fromPreset(preset, headers){
     if (o.type === "count"){
       const kept = [];
       for (const nm of r.fields || []){
-        const i = find(nm);
-        if (i === null) missing.push({ where:"rule", level:n + 1, name:nm });
-        else kept.push(i);
+        const c = classify(nm);
+        if (c.i !== undefined) kept.push(c.i);
+        else if (c.pending) pending.push({ where:"rule", level:n + 1, placeholder:nm });
+        else missing.push({ where:"rule", level:n + 1, name:nm });
       }
       o.fields = kept.sort((a, b) => a - b);
-      if (!kept.length) o.on = false;
+      if (!kept.length && !pending.some(x => x.level === n + 1)) o.on = false;
     } else {
-      const i = find(r.field);
-      if (i === null){
+      const c = classify(r.field);
+      if (c.i !== undefined) o.field = c.i;
+      else if (c.pending){
+        // Waiting on a person, not broken: stays on so it is asked about.
+        pending.push({ where:"rule", level:n + 1, placeholder:r.field });
+        o.field = null;
+        o.needs = r.field;
+      } else {
         missing.push({ where:"rule", level:n + 1, name:r.field });
         o.field = 0;
         o.on = false;          // inert and visible beats silently misbound
-      } else o.field = i;
+      }
     }
     return o;
   });
 
-  return { label: preset.label, note: preset.note, match, prefix, rules, missing };
+  return { label: preset.label, note: preset.note, match, prefix, rules, missing, pending };
 }
 
 /* ==== presets:end ==== */
@@ -1402,8 +1516,9 @@ const MONTHS = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov
 
 const DATE_RE = {
   iso:    /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
-  num:    /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2}|\d{4})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
+  num:    /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2}|\d{4})(?:[T, ]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?)?$/,
   mon:    /^(\d{1,2})[\s-]([A-Za-z]{3,9})[\s-](\d{2}|\d{4})$/,
+  ymd8:   /^(\d{4})(\d{2})(\d{2})$/,
   serial: /^\d{1,6}(\.\d+)?$/
 };
 
@@ -1438,7 +1553,13 @@ function parseDateWith(raw, format){
     const a = +m[1], b = +m[2], y = fourDigitYear(m[3]);
     const d = format === "dmy" ? a : b;
     const mo = format === "dmy" ? b : a;
-    return utcOf(y, mo, d, +m[4], +m[5], +m[6]);
+    let hh = m[4] ? +m[4] : 0;
+    if (m[7]){                       // 12-hour clock: 12 AM is 0, 12 PM is 12
+      const pm = /p/i.test(m[7]);
+      if (hh === 12) hh = pm ? 12 : 0;
+      else if (pm) hh += 12;
+    }
+    return utcOf(y, mo, d, hh, +m[5], +m[6]);
   }
   if (format === "mon"){
     m = s.match(DATE_RE.mon);
@@ -1446,6 +1567,10 @@ function parseDateWith(raw, format){
     const mo = MONTHS.indexOf(m[2].slice(0, 3).toLowerCase()) + 1;
     if (!mo) return null;
     return utcOf(fourDigitYear(m[3]), mo, +m[1]);
+  }
+  if (format === "ymd8"){
+    m = s.match(DATE_RE.ymd8);
+    return m ? utcOf(+m[1], +m[2], +m[3]) : null;
   }
   if (format === "serial"){
     if (!DATE_RE.serial.test(s)) return null;
@@ -1466,7 +1591,7 @@ function detectDateFormat(values){
   const out = { format:null, status:"none", candidates:[], total, parsed:0, unparsed:total, sample:seen[0] || null };
   if (!total) return out;
 
-  const counts = { iso:0, num:0, mon:0, serial:0 };
+  const counts = { iso:0, num:0, mon:0, ymd8:0, serial:0 };
   let dayFirst = 0, monthFirst = 0;
   for (const s of seen){
     if (DATE_RE.iso.test(s)){ counts.iso++; continue; }
@@ -1478,6 +1603,9 @@ function detectDateFormat(values){
       continue;
     }
     if (DATE_RE.mon.test(s)){ counts.mon++; continue; }
+    // Only claim the compact form when the digits really are a date; 99999999
+    // and 20261301 are not, and must not drag a numeric column in with them.
+    if (DATE_RE.ymd8.test(s) && parseDateWith(s, "ymd8") !== null){ counts.ymd8++; continue; }
     if (DATE_RE.serial.test(s)){ counts.serial++; }
   }
 
@@ -1488,6 +1616,7 @@ function detectDateFormat(values){
 
   if (counts.iso && counts.iso >= counts.num && counts.iso >= counts.mon) return pick("iso", counts.iso);
   if (counts.mon && counts.mon >= counts.num) return pick("mon", counts.mon);
+  if (counts.ymd8 && counts.ymd8 === total) return pick("ymd8", counts.ymd8);
 
   if (counts.num){
     if (dayFirst && monthFirst){
@@ -1593,8 +1722,8 @@ function makeValueStrip(opts){
 function ruleIsOn(c){ return c.on !== false; }
 function dirOf(c){ return c.dir === "min" || c.dir === -1 ? -1 : +1; }
 
-const DATE_FMT_ID = { ISO:"iso", DMY:"dmy", MDY:"mdy", MON:"mon", SERIAL:"serial" };
-const FMT_NAME = { iso:"ISO", dmy:"DMY", mdy:"MDY", mon:"MON", serial:"SERIAL" };
+const DATE_FMT_ID = { ISO:"iso", DMY:"dmy", MDY:"mdy", MON:"mon", YMD8:"ymd8", SERIAL:"serial" };
+const FMT_NAME = { iso:"ISO", dmy:"DMY", mdy:"MDY", mon:"MON", ymd8:"YMD8", serial:"SERIAL" };
 
 /* Turn the config objects the UI edits into live, scored rules. Criteria that
    are switched off are left out of the chain entirely. */

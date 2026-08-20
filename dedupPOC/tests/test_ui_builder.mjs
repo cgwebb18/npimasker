@@ -245,3 +245,28 @@ test("a preset naming a column this file lacks warns and switches that rule off"
   assert.match(p.el("presetWarn").textContent, /Not A Column/);
   assert.equal(p.RULECFG[0].on, false, "inert and visible, never silently rebound");
 });
+
+test("a preset with an unchosen column blocks the run and names it", () => {
+  const p = boot();
+  p.applyPreset({
+    version:1, label:"Casenotes", note:"Choose Last Modified Date.",
+    match:["ref_id"], prefix:{},
+    rules:[{ type:"minmax", parse:"date", dir:"min", field:"__PICK_LAST_DATE__", on:true }],
+  });
+  assert.equal(p.RULECFG[0].on, true, "waiting on a person, not broken");
+  assert.equal(p.RULECFG[0].needs, "__PICK_LAST_DATE__");
+  assert.equal(p.el("run").disabled, true, "cannot run until it is chosen");
+  assert.match(p.el("ruleErr").textContent, /__PICK_LAST_DATE__/);
+  assert.match(p.el("presetWarn").textContent, /Choose Last Modified Date/);
+});
+
+test("choosing the column clears the block", () => {
+  const p = boot();
+  p.applyPreset({
+    version:1, label:"x", note:"", match:["ref_id"], prefix:{},
+    rules:[{ type:"minmax", parse:"date", dir:"min", field:"__PICK_LAST_DATE__", fmt:"ISO", on:true }],
+  });
+  p.RULECFG[0].field = 2; delete p.RULECFG[0].needs;
+  p.syncPick();
+  assert.equal(p.el("run").disabled, false);
+});

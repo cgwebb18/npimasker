@@ -168,3 +168,47 @@ test("reports its type, column and unreadable count", () => {
   assert.equal(rule.col, 0);
   assert.equal(rule.unreadable, 2, "the blank and the junk");
 });
+
+/* ---------- formats carried over from Version_08_19 ---------- */
+
+test("AM and PM times are read, and order within the day", () => {
+  const morning = R.parseDateWith("04/03/2026 9:30 AM", "dmy");
+  const evening = R.parseDateWith("04/03/2026 9:30 PM", "dmy");
+  assert.equal(morning, D(2026, 3, 4) + 9.5 * 3600000);
+  assert.equal(evening, D(2026, 3, 4) + 21.5 * 3600000);
+  assert.ok(evening > morning);
+});
+
+test("12 AM is midnight and 12 PM is noon", () => {
+  assert.equal(R.parseDateWith("04/03/2026 12:00 AM", "dmy"), D(2026, 3, 4));
+  assert.equal(R.parseDateWith("04/03/2026 12:00 PM", "dmy"), D(2026, 3, 4) + 12 * 3600000);
+});
+
+test("a comma between date and time is accepted", () => {
+  assert.equal(R.parseDateWith("04/03/2026, 14:05", "dmy"), D(2026, 3, 4) + 14 * 3600000 + 5 * 60000);
+});
+
+test("the compact yyyymmdd form parses", () => {
+  assert.equal(R.parseDateWith("20260304", "ymd8"), D(2026, 3, 4));
+});
+
+test("yyyymmdd is still range-checked", () => {
+  assert.equal(R.parseDateWith("20261301", "ymd8"), null, "month 13");
+  assert.equal(R.parseDateWith("20260231", "ymd8"), null, "31 February");
+});
+
+test("yyyymmdd is not read as an Excel serial or the reverse", () => {
+  assert.equal(R.parseDateWith("20260304", "serial"), null, "far outside the serial range");
+  assert.equal(R.parseDateWith("46085", "ymd8"), null, "too short to be a date this way");
+});
+
+test("a column of 8-digit dates is detected", () => {
+  const d = detect(["20260304", "20251127", "20240101"]);
+  assert.equal(d.status, "ok");
+  assert.equal(d.format, "ymd8");
+});
+
+test("8-digit values that cannot all be dates are not claimed as dates", () => {
+  const d = detect(["20261301", "99999999"]);
+  assert.notEqual(d.format, "ymd8");
+});

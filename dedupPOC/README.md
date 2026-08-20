@@ -50,6 +50,16 @@ Type the prefix exactly as it appears in the data. Leave the box empty for colum
 
 The prefix is only ignored **when comparing**. It is never deleted from your data — if the row that survives happens to carry the prefix, it keeps it.
 
+## Pick the dataset
+
+The picker at the top of step 02 starts you from a known setup rather than a blank page. **Casenotes**, **Assessments**, **HMIS Services** and **HRM Services** are built in; anything you save joins the list underneath them.
+
+A built-in preset cannot know your column names for certain, so some leave a column for you to choose. When one does, the tool says which and will not run until you have picked it. That is deliberate — it is the difference between "waiting for you" and "quietly using the wrong column".
+
+If a preset names a column your file does not have at all, the tool says so by name and switches that criterion **off**. It never attaches a criterion to a column it merely resembles.
+
+---
+
 ## Saving a setup so you only do it once
 
 Once the match columns and the criteria are right, click **Save these settings…** and give them a name.

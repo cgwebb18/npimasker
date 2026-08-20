@@ -73,5 +73,9 @@ export function loadGrid(){
 }
 
 export function loadPresets(){
-  return exportsOf(region("presets"), ["toPreset", "fromPreset", "parsePreset", "normName"]);
+  const src = region("presets");
+  const names = ["toPreset", "fromPreset", "parsePreset", "normName", "isPlaceholder"];
+  const fields = names.map(n => `${n}: typeof ${n} === "function" ? ${n} : undefined`).join(",");
+  return new Function('"use strict";' + src +
+    "\nreturn {" + fields + ", BUILTIN_PRESETS: typeof BUILTIN_PRESETS !== 'undefined' ? BUILTIN_PRESETS : []};")();
 }
