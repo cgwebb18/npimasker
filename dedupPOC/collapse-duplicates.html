@@ -825,7 +825,7 @@ function renderChain(){
   const parts = describeChain(RULECFG, shortColName);
   const html = parts.map((p, i) => '<b>' + (i + 1) + '.</b> ' + esc(p)).join(' &nbsp;\u00b7&nbsp; ') +
     ' &nbsp;\u00b7&nbsp; <span class="fall"><b>' + (parts.length + 1) +
-    '.</b> otherwise keep the last row in the file</span>';
+    '.</b> otherwise keep the row nearest the top of the file</span>';
   $("#ruleChain").innerHTML = html;
 }
 
@@ -900,8 +900,9 @@ function syncPick(){
    An ordered chain of rules decides which row of a collision group survives.
    Each level keeps only the candidates tied at its best score; if one is left
    it wins, otherwise the next level runs on just those. When the rules are
-   spent, the last row in file order wins — the same fallback the tool has
-   always used, and what guarantees a winner exists at all.
+   spent, the row nearest the top of the file wins. That fallback is what
+   guarantees a winner exists at all, and it is deliberate: on these datasets
+   the criteria often tie, and "oldest wins" is the intent throughout.
 
    Everything between the markers below is pure: no DOM, no globals, no I/O.
    dedupPOC/tests/ slices this block straight out of this file and runs it, so
@@ -962,7 +963,7 @@ function pickWinner(idxs, rules){
     cand = next;   // only ever shrinks, so file order is preserved throughout
   }
 
-  return { winner: cand[cand.length - 1], trail, decidedBy };
+  return { winner: cand[0], trail, decidedBy };
 }
 
 /* cellAt(rowIndex, col) -> string. Injected so the rules stay testable
@@ -976,9 +977,9 @@ function makeHasValueRule(cellAt, col, wsBlank){
       return (wsBlank ? v.trim().length : v.length) > 0 ? 1 : null;
     },
     reason(outcome){
-      if (outcome === "narrowed") return "Kept the last row that carries a tiebreak value.";
-      if (outcome === "tied") return "All rows carry a tiebreak value — last one in the file wins.";
-      return "No row carries a tiebreak value — last one in the file wins.";
+      if (outcome === "narrowed") return "Kept the first row that carries a tiebreak value.";
+      if (outcome === "tied") return "All rows carry a tiebreak value — the one nearest the top of the file wins.";
+      return "No row carries a tiebreak value — the one nearest the top of the file wins.";
     }
   };
 }
@@ -1002,7 +1003,7 @@ function makeCompletenessRule(cellAt, n, cols, opts){
     reason(outcome){
       const most = (opts.dir === -1) ? "fewest" : "most";
       if (outcome === "narrowed") return "Kept the row filling the " + most + " of the chosen columns.";
-      if (outcome === "tied") return "Every row fills the same number of those columns — last one in the file wins.";
+      if (outcome === "tied") return "Every row fills the same number of those columns — the one nearest the top wins.";
       return "Completeness could not separate these rows.";
     }
   };
@@ -1066,7 +1067,7 @@ function makeNumberRule(cellAt, n, col, opts){
     reason(outcome){
       const which = (opts.dir === -1) ? "lowest" : "highest";
       if (outcome === "narrowed") return "Kept the row with the " + which + " number in that column.";
-      if (outcome === "tied") return "Those numbers are equal — last one in the file wins.";
+      if (outcome === "tied") return "Those numbers are equal — the one nearest the top of the file wins.";
       return "No row has a readable number in that column.";
     }
   };
@@ -1213,7 +1214,7 @@ function makeDateRule(cellAt, n, col, opts){
     reason(outcome){
       const which = (opts.dir === -1) ? "earliest" : "latest";
       if (outcome === "narrowed") return "Kept the row with the " + which + " date in that column.";
-      if (outcome === "tied") return "Those dates are the same — last one in the file wins.";
+      if (outcome === "tied") return "Those dates are the same — the one nearest the top of the file wins.";
       return "No row has a readable date in that column.";
     }
   };
@@ -1256,7 +1257,7 @@ function reasonFor(rules, trail, decidedBy){
   const tied = trail.find(t => t.outcome === "tied");
   if (tied) return say(tied.level, "tied");
   if (trail.length) return say(trail[trail.length - 1].level, "skipped");
-  return "No rules configured — last row in the file wins.";
+  return "No rules configured — the row nearest the top of the file wins.";
 }
 
 /* The whole collapse, with no DOM in sight: group the rows, pick a survivor in
@@ -1318,7 +1319,7 @@ function collapseRows(o){
 
     decidedAt[pick.decidedBy === null ? rules.length : pick.decidedBy]++;
     if (pick.trail.length && pick.trail.every(t => t.outcome === "skipped")) allBlankGroups++;
-    if (winner !== idxs[idxs.length - 1]) conflicts++;
+    if (winner !== idxs[0]) conflicts++;
 
     keepFlag[winner] = 1;
     if (prefixed[winner]) pfxSurvivor++;
@@ -1409,7 +1410,7 @@ function render(){
   const att = RESULT.decidedAt.map((cnt, i) => {
     if (!cnt) return null;
     const name = i < RESULT.chain.length ? "<b>" + (i + 1) + ".</b> " + esc(RESULT.chain[i])
-                                         : '<span class="fall"><b>' + (i + 1) + '.</b> last row in the file</span>';
+                                         : '<span class="fall"><b>' + (i + 1) + '.</b> nearest the top of the file</span>';
     return name + " \u2192 " + n(cnt) + " group" + (cnt === 1 ? "" : "s");
   }).filter(Boolean);
   $("#attrib").innerHTML = RESULT.stats.dupGroups
@@ -1437,7 +1438,7 @@ function render(){
   if (s.edgeSpace) h.push('<b>' + n(s.edgeSpace) + ' cells</b> in the match columns start or end with a space. Those spaces are part of the comparison.');
   if (s.sci) h.push('<b>' + n(s.sci) + ' cells</b> in the match columns look like scientific notation (1.23E+15). Excel does that to long numbers, and it destroys the original digits.');
   if (s.wsOnly) h.push('<b>' + n(s.wsOnly) + ' cells</b> in the tiebreak column hold only spaces. They were treated as ' + (RESULT.wsBlank ? 'empty' : 'a value') + '.');
-  if (s.allBlankGroups) h.push('<b>' + n(s.allBlankGroups) + ' groups</b> had no tiebreak value on any row, so the last row in the file was kept.');
+  if (s.allBlankGroups) h.push('<b>' + n(s.allBlankGroups) + ' groups</b> had no tiebreak value on any row, so the row nearest the top of the file was kept.');
   $("#hazards").innerHTML = h.length
     ? '<div class="haz"><h3 class="disp">Worth checking before you trust the output</h3><ul><li>' + h.join('</li><li>') + '</li></ul></div>'
     : '';
@@ -1532,7 +1533,7 @@ $("#dlSummary").addEventListener("click", () => {
   RESULT.chain.forEach((line, i) => {
     L.push("  rule " + (i + 1) + " .................. " + line);
   });
-  L.push("  rule " + (RESULT.chain.length + 1) + " .................. otherwise keep the last row in the file");
+  L.push("  rule " + (RESULT.chain.length + 1) + " .................. otherwise keep the row nearest the top of the file");
   L.push("  comparison .............. exact, case and whitespace sensitive");
   if (RESULT.anyPfx){
     for (const [c, p] of RESULT.pfxMap)
@@ -1543,6 +1544,7 @@ $("#dlSummary").addEventListener("click", () => {
     L.push("  prefixes ignored ........ none");
   }
   L.push("  survivor ................ first rule above that separates the rows; ties fall to the next");
+  L.push("  final fallback .......... the row nearest the top of the file");
   L.push("  spaces-only cells ....... treated as " + (RESULT.wsBlank ? "empty" : "a value"));
   L.push("");
   L.push("RESULT");

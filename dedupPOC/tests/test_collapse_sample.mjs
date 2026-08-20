@@ -80,9 +80,11 @@ test("README golden numbers: 18 out, 11 removed, 9 colliding groups", () => {
   assert.equal(out.stats.dupGroups, 9, "colliding groups");
 });
 
-test("README golden flags: 3 overrides, 3 joined by prefix, 4 near-miss", () => {
+test("README golden flags: 2 overrides, 3 joined by prefix, 4 near-miss", () => {
   const { out } = runSample();
-  assert.equal(out.stats.conflicts, 3, "tiebreak overrode order");
+  // "overrode order" is measured against the positional fallback, which is now
+  // the row nearest the top of the file rather than the last one.
+  assert.equal(out.stats.conflicts, 2, "rules overrode file order");
   assert.equal(out.stats.pfxMerged, 3, "groups joined by prefix");
   assert.equal(out.stats.nearMiss, 4, "near-miss keys");
 });

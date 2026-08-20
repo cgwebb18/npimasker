@@ -62,7 +62,7 @@ test("the chain sentence names every level and ends with the fallback", () => {
   assert.match(text, /latest service_date/);
   assert.match(text, /lowest invoice_no/);
   assert.match(text, /most of 2 columns/);
-  assert.match(text, /last row in the file/, "the fallback is always shown");
+  assert.match(text, /nearest the top of the file/, "the fallback is always shown");
 });
 
 test("a completeness rule with no columns blocks the run and says why", () => {

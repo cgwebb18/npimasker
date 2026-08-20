@@ -54,7 +54,7 @@ test("equal completeness ties, leaving it to the next level", () => {
   const rule = R.makeCompletenessRule(cellAt, ROWS.length, COLS, { wsBlank: true });
   const got = R.pickWinner([1, 4], [rule]);   // both score 2
   assert.equal(got.trail[0].outcome, "tied");
-  assert.equal(got.winner, 4, "unbroken tie falls through to file order");
+  assert.equal(got.winner, 1, "unbroken tie falls through to file order");
 });
 
 test("only the chosen columns are counted", () => {

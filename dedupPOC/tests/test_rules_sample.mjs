@@ -120,12 +120,12 @@ test("group C ties on date and invoice, and is decided by completeness", () => {
     "the row that fills all three contact columns");
 });
 
-test("group D ties everywhere and falls through to the last row in the file", () => {
+test("group D ties everywhere and falls through to the top of the file", () => {
   const { rows, out } = run();
   const g = groupFor(rows, out, "D-400");
   assert.equal(g.decidedBy, null);
-  assert.equal(g.winner, g.idxs[g.idxs.length - 1]);
-  assert.match(g.reason, /last one in the file/);
+  assert.equal(g.winner, g.idxs[0], "nearest the top, not the last");
+  assert.match(g.reason, /nearest the top/);
 });
 
 test("group E: a row whose date cannot be read loses to one that can", () => {

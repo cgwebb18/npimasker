@@ -54,7 +54,7 @@ The prefix is only ignored **when comparing**. It is never deleted from your dat
 
 When rows collide, the tool keeps one of them and drops the rest. You decide which, by building a list of rules.
 
-The rules run **in order**. The first rule looks at every row in the group and keeps only the best ones. If that leaves a single row, it wins. If it leaves several tied, the second rule looks at just those, and so on. If the rules run out and rows are still tied, the **last row in the file** wins.
+The rules run **in order**. The first rule looks at every row in the group and keeps only the best ones. If that leaves a single row, it wins. If it leaves several tied, the second rule looks at just those, and so on. If the rules run out and rows are still tied, the row **nearest the top of the file** wins.
 
 That last line never changes and cannot be removed. It is what guarantees the tool always picks exactly one row.
 
@@ -62,7 +62,7 @@ That last line never changes and cannot be removed. It is what guarantees the to
 
 | Rule | What it does |
 |---|---|
-| **Carries a value** | A row with something in the chosen column beats a row without. This is the old tiebreak behaviour. |
+| **Carries a value** | A row with something in the chosen column beats a row without. |
 | **Earliest / latest date** | Compares dates in the chosen column. |
 | **Lowest / highest number** | Compares numbers in the chosen column, ignoring any prefix you name. |
 | **Most values filled** | Counts how many of several columns a row actually fills, and keeps the fullest. |
@@ -97,7 +97,7 @@ Click **Collapse duplicates**. On a large file this takes a few seconds.
 |---|---|
 | **Rows in / Rows removed / Rows out** | The arithmetic. Rows in minus rows removed should equal rows out. |
 | **Colliding groups** | How many sets of duplicate rows were found. |
-| **Rules overrode order** | Groups where the last row was *not* the one kept, because a rule chose an earlier one. |
+| **Rules overrode order** | Groups where the top row was *not* the one kept, because a rule chose a later one. |
 | **Groups joined by prefix** | Collisions that only exist because a prefix was ignored. If this looks wrong, the prefix you typed is probably wrong. |
 | **Near-miss keys** | Values that would have matched if capitals and spacing were ignored — but they weren't, so these rows were **left alone**. A high number means the source data is inconsistent. |
 
@@ -133,7 +133,7 @@ You should get:
 
 ```
 18 rows out          11 rows removed        9 colliding groups
-3 tiebreak overrides  3 groups joined by prefix   4 near-miss keys
+2 rules overrode order  3 groups joined by prefix   4 near-miss keys
 ```
 
 If those numbers match, the tool arrived intact and is working correctly.

@@ -159,7 +159,7 @@ test("rows with no readable date are eliminated when others have one", () => {
 test("a group with no readable dates skips the level", () => {
   const got = R.pickWinner([3, 4], [mk({})]);
   assert.equal(got.trail[0].outcome, "skipped");
-  assert.equal(got.winner, 4);
+  assert.equal(got.winner, 3);
 });
 
 test("reports its type, column and unreadable count", () => {

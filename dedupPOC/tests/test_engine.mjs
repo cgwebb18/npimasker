@@ -11,9 +11,9 @@ function ruleFrom(scores, dir = +1){
   return { type: "test", dir, score: i => scores[i] };
 }
 
-test("no rules at all: the last row in file order wins", () => {
+test("no rules at all: the row nearest the top of the file wins", () => {
   const got = R.pickWinner([3, 7, 11], []);
-  assert.equal(got.winner, 11);
+  assert.equal(got.winner, 3);
   assert.equal(got.decidedBy, null);
 });
 
@@ -41,7 +41,7 @@ test("rows scoring null are eliminated when others have a value", () => {
 
 test("when no row has a usable value the level is skipped, not failed", () => {
   const got = R.pickWinner([0, 1, 2], [ruleFrom({ 0: null, 1: null, 2: null })]);
-  assert.equal(got.winner, 2, "falls through to file order");
+  assert.equal(got.winner, 0, "falls through to file order");
   assert.equal(got.decidedBy, null);
   assert.equal(got.trail[0].outcome, "skipped");
 });
@@ -58,16 +58,16 @@ test("a level that cannot separate the candidates is recorded as tied", () => {
   const lvl1 = ruleFrom({ 0: 3, 1: 3 });
   const got = R.pickWinner([0, 1], [lvl1]);
   assert.equal(got.trail[0].outcome, "tied");
-  assert.equal(got.winner, 1, "unbroken tie falls through to file order");
+  assert.equal(got.winner, 0, "unbroken tie falls through to file order");
   assert.equal(got.decidedBy, null);
 });
 
 test("later levels cannot re-admit a row an earlier level eliminated", () => {
   const lvl1 = ruleFrom({ 0: 1, 1: 9, 2: 9 });   // row 0 is out
-  const lvl2 = ruleFrom({ 0: 100, 1: 2, 2: 5 }); // row 0 would win if re-admitted
+  const lvl2 = ruleFrom({ 0: 100, 1: 5, 2: 2 }); // row 0 would win if re-admitted
   const got = R.pickWinner([0, 1, 2], [lvl1, lvl2]);
   assert.notEqual(got.winner, 0, "monotone: eliminated rows stay eliminated");
-  assert.equal(got.winner, 2);
+  assert.equal(got.winner, 1);
 });
 
 test("evaluation stops once one candidate remains", () => {
@@ -78,10 +78,10 @@ test("evaluation stops once one candidate remains", () => {
   assert.equal(level2Ran, false, "no point scoring a field of one");
 });
 
-test("ties preserve file order, so the fallback is the genuine last row", () => {
+test("ties preserve file order, so the fallback is the genuine first row", () => {
   const all = ruleFrom({ 10: 1, 4: 1, 22: 1, 7: 1 });
   const got = R.pickWinner([4, 7, 10, 22], [all]);
-  assert.equal(got.winner, 22);
+  assert.equal(got.winner, 4);
 });
 
 test("every group yields exactly one winner drawn from the group", () => {
@@ -95,32 +95,33 @@ test("every group yields exactly one winner drawn from the group", () => {
 
 /* ---------- the has-value rule ---------- */
 
-test("has-value keeps the last row carrying a value", () => {
-  const rows = [["a", "x"], ["b", ""], ["c", "y"], ["d", ""]];
+test("has-value keeps the first row carrying a value", () => {
+  const rows = [["a", ""], ["b", "x"], ["c", "y"], ["d", ""]];
   const rule = R.makeHasValueRule(cellsOf(rows), 1, true);
   const got = R.pickWinner([0, 1, 2, 3], [rule]);
-  assert.equal(got.winner, 2);
+  assert.equal(got.winner, 1);
 });
 
-test("has-value with nothing filled falls through to the last row", () => {
+test("has-value with nothing filled falls through to the first row", () => {
   const rows = [["a", ""], ["b", ""], ["c", ""]];
   const rule = R.makeHasValueRule(cellsOf(rows), 1, true);
   const got = R.pickWinner([0, 1, 2], [rule]);
-  assert.equal(got.winner, 2);
+  assert.equal(got.winner, 0);
   assert.equal(got.decidedBy, null);
 });
 
 test("whitespace counts as empty when the setting is on", () => {
-  const rows = [["a", "v"], ["b", "   "]];
+  const rows = [["a", "   "], ["b", "v"]];
   const rule = R.makeHasValueRule(cellsOf(rows), 1, true);
-  assert.equal(R.pickWinner([0, 1], [rule]).winner, 0);
+  assert.equal(R.pickWinner([0, 1], [rule]).winner, 1,
+    "only row 1 carries a value, so position does not save row 0");
 });
 
 test("whitespace counts as a value when the setting is off", () => {
   const rows = [["a", "v"], ["b", "   "]];
   const rule = R.makeHasValueRule(cellsOf(rows), 1, false);
-  assert.equal(R.pickWinner([0, 1], [rule]).winner, 1,
-    "both carry a value, so the last one wins");
+  assert.equal(R.pickWinner([0, 1], [rule]).winner, 0,
+    "both carry a value, so the first one wins");
 });
 
 test("has-value is direction-maximum and reports its column", () => {

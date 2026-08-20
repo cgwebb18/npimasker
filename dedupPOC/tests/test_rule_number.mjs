@@ -115,7 +115,7 @@ test("rows with no readable number are eliminated, not treated as zero", () => {
 test("a group where nothing parses skips the level entirely", () => {
   const got = R.pickWinner([3, 4], [mk({ dir: -1 })]);
   assert.equal(got.trail[0].outcome, "skipped");
-  assert.equal(got.winner, 4, "falls through to file order");
+  assert.equal(got.winner, 3, "falls through to file order");
 });
 
 test("reports its type, column and direction", () => {
