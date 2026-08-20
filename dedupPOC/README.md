@@ -50,6 +50,23 @@ Type the prefix exactly as it appears in the data. Leave the box empty for colum
 
 The prefix is only ignored **when comparing**. It is never deleted from your data — if the row that survives happens to carry the prefix, it keeps it.
 
+## Saving a setup so you only do it once
+
+Once the match columns and the criteria are right, click **Save these settings…** and give them a name.
+
+Two things happen. The settings go into **Pick the dataset** at the top, so next time you open the tool they are already in the list — nothing to load. And a `.json` file is downloaded, which is the copy you can keep, email, or drop on a shared drive.
+
+On another machine, click **Load from a file…** and choose that `.json`. It joins the list there too.
+
+Settings are stored by **column name**, not by position, so they still work when next month's export has the columns in a different order. If a column is missing entirely the tool says so by name and switches the affected criterion off, rather than quietly attaching it to the wrong column.
+
+Two things worth knowing:
+
+- The in-browser list lives in that browser on that machine. Clearing your browsing data clears it. The `.json` file is the durable copy — keep it.
+- The tool cannot read a shared folder by itself; a page opened from a file has no way to list one. The `.json` file is how a setup travels between people.
+
+---
+
 ## Step 5 — Set the survivor rules
 
 When rows collide, the tool keeps one of them and drops the rest. You decide which, by building a list of rules.

@@ -71,3 +71,7 @@ export function cellsOf(rows){
 export function loadGrid(){
   return exportsOf(region("grid"), ["gridToTable", "headerLabel", "colLetter"]);
 }
+
+export function loadPresets(){
+  return exportsOf(region("presets"), ["toPreset", "fromPreset", "parsePreset", "normName"]);
+}

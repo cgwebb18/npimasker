@@ -12,8 +12,8 @@ const ROWS = [
   ["B-2", "S2", "2026-04-01", "INV-000042", "555-3", "b@x.com"],
 ];
 
-function boot(){
-  const p = bootPage();
+function boot(store){
+  const p = bootPage(store);
   p.setData(HEADERS, ROWS);
   p.buildPickers();
   return p;
@@ -188,4 +188,60 @@ test("a switched-off criterion is not validated", () => {
                { type:"hasvalue", field:4 }];
   p.syncPick();
   assert.equal(p.el("run").disabled, false, "an inactive rule cannot be invalid");
+});
+
+/* ---------- saved datasets ---------- */
+
+test("saving writes a .json file and puts the settings in the picker", () => {
+  const p = boot();
+  p.keySet.add(0); p.keySet.add(1);
+  p.RULECFG = [{ type:"minmax", parse:"date", dir:"max", field:2, fmt:"ISO" }];
+  p.setPrompt("Casenotes");
+  p.el("presetSave").fire("click");
+
+  const written = p.blobs.find(b => b.includes('"label"'));
+  assert.ok(written, "a settings file was produced");
+  const parsed = JSON.parse(written);
+  assert.equal(parsed.label, "Casenotes");
+  assert.deepEqual(parsed.match, ["ref_id", "site"], "saved by name, not position");
+  assert.equal(parsed.rules[0].field, "service_date");
+  assert.equal(p.SAVED.length, 1, "and it is in the list");
+});
+
+test("saved settings survive into the next session", () => {
+  const p = boot();
+  p.keySet.add(0);
+  p.setPrompt("Casenotes");
+  p.el("presetSave").fire("click");
+  assert.ok(p.store.get("collapse-duplicates.presets.v1"), "kept in this browser");
+
+  // a fresh page sharing the same storage
+  const q = boot(p.store);
+  assert.equal(q.SAVED.length, 1, "already in the list without loading a file");
+  assert.equal(q.SAVED[0].label, "Casenotes");
+});
+
+test("applying a preset restores match columns and criteria", () => {
+  const p = boot();
+  p.keySet.add(0); p.keySet.add(1);
+  p.RULECFG = [{ type:"minmax", parse:"number", dir:"min", field:3, strip:"prefix", pfx:"INV-" }];
+  p.setPrompt("Invoices");
+  p.el("presetSave").fire("click");
+
+  const q = boot(p.store);                // fresh page, same storage
+  q.applyPreset(q.SAVED[0]);
+  assert.deepEqual([...q.keySet].sort(), [0, 1]);
+  assert.equal(q.RULECFG[0].field, 3);
+  assert.equal(q.RULECFG[0].pfx, "INV-");
+});
+
+test("a preset naming a column this file lacks warns and switches that rule off", () => {
+  const p = boot();
+  p.applyPreset({
+    version: 1, label: "Elsewhere", note: "", match: ["ref_id"], prefix: {},
+    rules: [{ type:"minmax", parse:"date", dir:"max", field:"Not A Column", fmt:"ISO", on:true }],
+  });
+  assert.equal(p.el("presetWarn").hidden, false);
+  assert.match(p.el("presetWarn").textContent, /Not A Column/);
+  assert.equal(p.RULECFG[0].on, false, "inert and visible, never silently rebound");
 });

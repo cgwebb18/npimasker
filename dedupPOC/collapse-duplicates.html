@@ -120,6 +120,8 @@ input[type=text]{
 .rule-cols .chip{font-size:12px;padding:4px 9px}
 .rule-note{font-size:12.5px;color:var(--muted);margin-top:7px}
 .rule-note.bad{color:var(--drop)}
+.ds-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:6px}
+.ds-row select{flex:1 1 260px;min-width:0;font-size:13.5px}
 .chain{margin-top:14px;padding:12px 14px;background:var(--panel);border:1px solid var(--rule);
   border-left:3px solid var(--keep);border-radius:2px;font-size:13.5px;line-height:1.65}
 .chain b{font-weight:600}
@@ -215,6 +217,17 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
       <div class="step-note" id="pickCount"></div>
     </div>
     <div class="panel">
+      <div class="sub-label">Pick the dataset — start from settings you saved earlier, or set everything by hand.</div>
+      <div class="ds-row">
+        <select id="presetPick"></select>
+        <button class="btn ghost small" id="presetSave">Save these settings…</button>
+        <button class="btn ghost small" id="presetLoad">Load from a file…</button>
+        <button class="btn ghost small" id="presetForget" hidden>Remove from the list</button>
+        <input type="file" id="presetFile" accept=".json,application/json" hidden>
+      </div>
+      <div id="presetNote" class="rule-note"></div>
+      <div id="presetWarn" class="err" hidden></div>
+
       <div class="sub-label">Match columns — rows are duplicates only when <b>every</b> one of these is identical.</div>
       <div class="cols" id="keyCols"></div>
 
@@ -589,12 +602,13 @@ function load(file){
 
 /* ---------- column pickers ---------- */
 const keySet = new Set();
-function buildPickers(){
-  keySet.clear();
+/* The match-column chips, drawn from whatever keySet currently holds -- so a
+   preset can put its selection on screen the same way a click does. */
+function drawKeyChips(){
   const box = $("#keyCols"); box.innerHTML = "";
   HEADERS.forEach((h, i) => {
     const b = document.createElement("div");
-    b.className = "chip";
+    b.className = "chip" + (keySet.has(i) ? " on" : "");
     b.innerHTML = '<span class="ix">' + colLetter(i) + '</span>' + esc(headerLabel(HEADERS, i));
     b.addEventListener("click", () => {
       if (keySet.has(i)) { keySet.delete(i); b.classList.remove("on"); }
@@ -603,8 +617,17 @@ function buildPickers(){
     });
     box.appendChild(b);
   });
+}
+
+function buildPickers(){
+  keySet.clear();
+  drawKeyChips();
   RULECFG = [{ type:"hasvalue", field: HEADERS.length > 1 ? 1 : 0, on:true }];
   DATEFMT.clear();
+  CURRENT_PRESET = "";
+  SAVED = readStore();
+  drawPresetPicker();
+  presetWarn("");
   renderRules();
   $("#mapStep").hidden = false;
   syncPick();
@@ -870,6 +893,143 @@ function renderChain(){
   $("#ruleChain").innerHTML = html;
 }
 
+/* ---------- saved datasets ----------
+
+   The page runs from a file:// URL, so it cannot read a folder of presets by
+   itself. Two routes instead, and together they cover it: settings are kept in
+   this browser so they are simply in the list next time, and they can be saved
+   out as a .json file to keep, email, or drop on a shared drive and load on
+   another machine. */
+
+const STORE_KEY = "collapse-duplicates.presets.v1";
+let SAVED = [];            // presets kept in this browser
+let CURRENT_PRESET = null; // the label showing in the picker
+
+function readStore(){
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    const a = raw ? JSON.parse(raw) : [];
+    return Array.isArray(a) ? a : [];
+  } catch (e) { return []; }   // private mode, cleared storage, corrupt entry
+}
+function writeStore(list){
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(list)); return true; }
+  catch (e) { return false; }  // quota or a browser that refuses storage on file://
+}
+
+function presetWarn(msg){
+  const e = $("#presetWarn");
+  if (!msg){ e.hidden = true; e.textContent = ""; return; }
+  e.hidden = false; e.textContent = msg;
+}
+
+function drawPresetPicker(){
+  const sel = $("#presetPick");
+  sel.innerHTML = "";
+  const add = (v, label) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label;
+    if (v === CURRENT_PRESET) o.selected = true;
+    sel.appendChild(o);
+  };
+  add("", "Custom — set everything by hand");
+  SAVED.forEach((p, i) => add("saved:" + i, p.label));
+  $("#presetForget").hidden = !(CURRENT_PRESET || "").startsWith("saved:");
+  const note = $("#presetNote");
+  const cur = currentPresetObj();
+  note.textContent = cur && cur.note ? cur.note : "";
+}
+function currentPresetObj(){
+  if (!(CURRENT_PRESET || "").startsWith("saved:")) return null;
+  return SAVED[+CURRENT_PRESET.slice(6)] || null;
+}
+
+/* Put a preset's settings on screen, saying plainly what did not bind. */
+function applyPreset(preset){
+  const bound = fromPreset(preset, HEADERS);
+  keySet.clear();
+  for (const c of bound.match) keySet.add(c);
+  PFX.clear();
+  for (const [c, v] of bound.prefix) PFX.set(c, v);
+  RULECFG = bound.rules.length ? bound.rules
+                              : [{ type:"hasvalue", field: HEADERS.length > 1 ? 1 : 0, on:true }];
+  DATEFMT.clear();
+  drawKeyChips();
+  renderRules();
+  syncPick();
+
+  if (bound.missing.length){
+    const names = bound.missing.map(m => '"' + m.name + '"');
+    presetWarn("These settings mention " + bound.missing.length + " column" +
+      (bound.missing.length === 1 ? "" : "s") + " this file does not have: " +
+      names.join(", ") + ". Any criterion left without its column has been switched off — " +
+      "check the setup before running.");
+  } else presetWarn("");
+}
+
+$("#presetPick").addEventListener("change", () => {
+  CURRENT_PRESET = $("#presetPick").value;
+  presetWarn("");
+  const p = currentPresetObj();
+  if (p) applyPreset(p);
+  drawPresetPicker();
+});
+
+$("#presetSave").addEventListener("click", () => {
+  if (!HEADERS.length) return;
+  const suggested = (currentPresetObj() || {}).label || SRCNAME || "My settings";
+  const label = (window.prompt("Name these settings", suggested) || "").trim();
+  if (!label) return;
+
+  const preset = toPreset(label, HEADERS,
+    { match: keySet, prefix: PFX, rules: RULECFG, note: "" });
+
+  // Keep it in this browser so it is simply in the list next time...
+  const at = SAVED.findIndex(p => p.label === label);
+  if (at === -1) SAVED.push(preset); else SAVED[at] = preset;
+  const stored = writeStore(SAVED);
+  CURRENT_PRESET = "saved:" + (at === -1 ? SAVED.length - 1 : at);
+  drawPresetPicker();
+
+  // ...and hand over the file, which is the copy that can be shared.
+  saveBlob(new Blob([JSON.stringify(preset, null, 2)], { type:"application/json" }),
+           label.replace(/[^\w .-]+/g, "_") + ".dedup-settings.json");
+
+  presetWarn(stored
+    ? ""
+    : "Saved to a file, but this browser would not keep a copy — it will not be in the list next time. Load the file when you need it.");
+});
+
+$("#presetLoad").addEventListener("click", () => $("#presetFile").click());
+$("#presetFile").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const preset = parsePreset(String(r.result));
+      const at = SAVED.findIndex(p => p.label === preset.label);
+      if (at === -1) SAVED.push(preset); else SAVED[at] = preset;
+      writeStore(SAVED);
+      CURRENT_PRESET = "saved:" + (at === -1 ? SAVED.length - 1 : at);
+      drawPresetPicker();
+      if (HEADERS.length) applyPreset(preset);
+    } catch (err) { presetWarn(err.message); }
+  };
+  r.readAsText(f, "UTF-8");
+  e.target.value = "";        // so the same file can be picked twice
+});
+
+$("#presetForget").addEventListener("click", () => {
+  const p = currentPresetObj();
+  if (!p) return;
+  SAVED = SAVED.filter(x => x !== p);
+  writeStore(SAVED);
+  CURRENT_PRESET = "";
+  drawPresetPicker();
+  presetWarn("");
+});
+
 $("#addRule").addEventListener("click", () => {
   const used = new Set(RULECFG.map(c => c.field));
   let col = 0;
@@ -950,6 +1110,105 @@ function syncPick(){
    dedupPOC/tests/ slices this block straight out of this file and runs it, so
    the tested code and the shipped code cannot drift apart. Keep it that way.
 */
+/* ==== presets:begin ==== */
+
+/* A saved preset is the whole setup for a dataset: the match columns that
+   decide what counts as a duplicate, and the ordered criteria that decide
+   which row survives. It is stored by column NAME, never by position, so it
+   still works on next month's export when a column has moved.
+
+   Binding one back to a file is where this can go quietly wrong, so it never
+   guesses: a name that cannot be found is reported, and any criterion left
+   without its column comes back switched off rather than pointing somewhere
+   plausible. */
+
+const PRESET_VERSION = 1;
+
+/* Compare header names the way people retype them: case, spacing and
+   punctuation drift, the words do not. */
+function normName(s){ return String(s == null ? "" : s).toLowerCase().replace(/[^a-z0-9]/g, ""); }
+
+function toPreset(label, headers, settings){
+  const name = i => String(headers[i] == null ? "" : headers[i]);
+  const prefix = {};
+  for (const [c, v] of settings.prefix) prefix[name(c)] = v;
+  return {
+    version: PRESET_VERSION,
+    label: label,
+    note: settings.note || "",
+    match: [...settings.match].sort((a, b) => a - b).map(name),
+    prefix: prefix,
+    rules: settings.rules.map(r => {
+      const o = Object.assign({}, r);
+      if (o.type === "count") o.fields = (r.fields || []).map(name);
+      else o.field = name(r.field);
+      o.on = r.on !== false;
+      return o;
+    })
+  };
+}
+
+function parsePreset(text){
+  let o;
+  try { o = JSON.parse(text); }
+  catch (e) { throw new Error("that file could not be read as settings — it is not valid JSON"); }
+  if (!o || typeof o !== "object" || !Array.isArray(o.rules) || !Array.isArray(o.match))
+    throw new Error("that file is not a saved preset");
+  if (typeof o.version === "number" && o.version > PRESET_VERSION)
+    throw new Error("those settings were saved by a newer version of this tool");
+  if (!o.label || !String(o.label).length) o.label = "Saved settings";
+  o.prefix = o.prefix && typeof o.prefix === "object" ? o.prefix : {};
+  o.note = o.note || "";
+  return o;
+}
+
+/* Attach a preset to a particular file's headers. */
+function fromPreset(preset, headers){
+  const index = new Map();
+  headers.forEach((h, i) => { const k = normName(h); if (!index.has(k)) index.set(k, i); });
+  const find = n => { const i = index.get(normName(n)); return i === undefined ? null : i; };
+
+  const missing = [];
+  const match = new Set();
+  for (const n of preset.match){
+    const i = find(n);
+    if (i === null) missing.push({ where:"match", name:n });
+    else match.add(i);
+  }
+  const prefix = new Map();
+  for (const n of Object.keys(preset.prefix || {})){
+    const i = find(n);
+    if (i === null) missing.push({ where:"prefix", name:n });
+    else prefix.set(i, preset.prefix[n]);
+  }
+
+  const rules = preset.rules.map((r, n) => {
+    const o = Object.assign({}, r);
+    if (o.type === "count"){
+      const kept = [];
+      for (const nm of r.fields || []){
+        const i = find(nm);
+        if (i === null) missing.push({ where:"rule", level:n + 1, name:nm });
+        else kept.push(i);
+      }
+      o.fields = kept.sort((a, b) => a - b);
+      if (!kept.length) o.on = false;
+    } else {
+      const i = find(r.field);
+      if (i === null){
+        missing.push({ where:"rule", level:n + 1, name:r.field });
+        o.field = 0;
+        o.on = false;          // inert and visible beats silently misbound
+      } else o.field = i;
+    }
+    return o;
+  });
+
+  return { label: preset.label, note: preset.note, match, prefix, rules, missing };
+}
+
+/* ==== presets:end ==== */
+
 /* ==== rules:begin ==== */
 
 const NUL = "\u0000";   // key separator; never occurs in spreadsheet text

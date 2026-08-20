@@ -34,6 +34,7 @@ class El {
   addEventListener(ev, fn){ (this.listeners[ev] ||= []).push(fn); }
   fire(ev, arg){ for (const fn of this.listeners[ev] || []) fn(arg || { preventDefault(){} }); }
   scrollIntoView(){}
+  click(){ this.fire("click"); }
   remove(){}
   querySelectorAll(){ return []; }
   /* depth-first search of created children, for assertions */
@@ -49,7 +50,7 @@ class El {
   }
 }
 
-export function bootPage(){
+export function bootPage(sharedStore){
   const html = readFileSync(PAGE, "utf8");
   const i = html.indexOf('<script>\n"use strict";');
   const j = html.indexOf("</script>", i);
@@ -81,6 +82,8 @@ export function bootPage(){
       el: (id) => __byId(id),
       setData(h, r){ HEADERS = h; ROWS = r; },
       buildPickers, renderRules, syncPick, runCollapse, render, defaultCfg,
+      drawPresetPicker, applyPreset,
+      get SAVED(){ return SAVED; }, set SAVED(v){ SAVED = v; },
       keySet,
       get RULECFG(){ return RULECFG; }, set RULECFG(v){ RULECFG = v; },
       get RESULT(){ return RESULT; },
@@ -95,9 +98,25 @@ export function bootPage(){
     write(){ throw new RangeError("Invalid array length"); },
     read(){ return { SheetNames:[], Sheets:{} }; },
   };
-  const win = { URL: { createObjectURL: () => "blob:stub", revokeObjectURL(){} } };
-  const fn = new Function("document", "window", "XLSX", "URL", "Blob", "setTimeout", "__byId", js + epilogue);
-  const api = fn(document, win, XLSX, win.URL, function Blob(){}, () => 0, el);
+  const store = sharedStore || new Map();
+  const localStorage = {
+    getItem: k => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)); },
+    removeItem: k => { store.delete(k); },
+  };
+  let promptReply = "My settings";
+  const win = {
+    URL: { createObjectURL: () => "blob:stub", revokeObjectURL(){} },
+    prompt: () => promptReply,
+  };
+  const saved = [];
+  function Blob(parts){ this.parts = parts; saved.push(String(parts && parts[0])); }
+  const fn = new Function("document", "window", "XLSX", "URL", "Blob", "setTimeout",
+                          "localStorage", "__byId", js + epilogue);
+  const api = fn(document, win, XLSX, win.URL, Blob, () => 0, localStorage, el);
+  api.store = store;
+  api.blobs = saved;
+  api.setPrompt = v => { promptReply = v; };
   api.byId = byId;
   return api;
 }
