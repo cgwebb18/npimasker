@@ -34,7 +34,7 @@ function exportsOf(src, names){
 }
 
 export function loadCsv(){
-  return exportsOf(region("csv"), ["parseCSV", "sniffDelim", "toCSV", "csvCell"]);
+  return exportsOf(region("csv"), ["parseCSV", "sniffDelim", "toCSV", "csvCell", "decodeText"]);
 }
 
 export function loadRules(){

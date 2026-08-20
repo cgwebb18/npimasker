@@ -171,6 +171,8 @@ That spread is the point. Every level does real work, and one group ties all the
 
 **"Could not read that file."** Close the file in Excel and try again. Check the first row really is the headings.
 
+**Accented names look wrong.** The tool works out the encoding from the file itself and tells you which one it used, next to the row count. Excel's plain **CSV (Comma delimited)** is not UTF-8 — it is Windows-1252 — and the tool reads it correctly either way. If a name still looks wrong, re-save the source as **CSV UTF-8** and run it again.
+
 **The browser says the page is unresponsive.** Writing a very large `.xlsx` can take 10–20 seconds. Wait, or use the `.csv` download button instead — it's much faster.
 
 **Fewer duplicates removed than expected.** Look at the near-miss count. The tool matches exactly, so inconsistent spacing or capitals in the source data will leave rows uncollapsed. That's the setting behaving as specified, not a fault.

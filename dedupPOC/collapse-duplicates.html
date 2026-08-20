@@ -290,9 +290,39 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
 const $ = s => document.querySelector(s);
 let HEADERS = [], ROWS = [], SRCNAME = "data", SRCKIND = "xlsx", RESULT = null;
 let RULECFG = [];   // ordered survivor-rule configs, edited by the builder
+let ENCODING = "utf-8";   // how the last CSV was decoded
 
 /* ---------- strict CSV parsing (no type coercion, RFC4180 quoting) ---------- */
 /* ==== csv:begin ==== */
+
+/* Work out how the bytes of a CSV are encoded, rather than assuming UTF-8.
+   Excel on Windows writes Windows-1252 for plain "CSV (Comma delimited)" --
+   only its separate "CSV UTF-8" option is UTF-8. Decoding those bytes as UTF-8
+   turns every accented character into U+FFFD, which can make two genuinely
+   different values compare equal and get one of them deleted. Nothing in the
+   output would look wrong, so this has to be settled before parsing. */
+function decodeText(bytes){
+  if (!bytes.length) return { text:"", encoding:"utf-8" };
+
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF)
+    return { text: new TextDecoder("utf-8").decode(bytes.subarray(3)), encoding:"utf-8" };
+  if (bytes[0] === 0xFF && bytes[1] === 0xFE)
+    return { text: new TextDecoder("utf-16le").decode(bytes.subarray(2)), encoding:"utf-16le" };
+  if (bytes[0] === 0xFE && bytes[1] === 0xFF)
+    return { text: new TextDecoder("utf-16be").decode(bytes.subarray(2)), encoding:"utf-16be" };
+
+  // No BOM. Strict UTF-8 first: if the bytes are valid UTF-8 they are
+  // overwhelmingly likely to be UTF-8, since cp1252 text rarely satisfies it
+  // by accident. fatal:true is what makes this a decision rather than a guess.
+  try {
+    return { text: new TextDecoder("utf-8", { fatal:true }).decode(bytes), encoding:"utf-8" };
+  } catch (e) {
+    // Not UTF-8. Fall back to the encoding Excel actually wrote, and let the
+    // caller tell the user which one was used.
+    return { text: new TextDecoder("windows-1252").decode(bytes), encoding:"windows-1252" };
+  }
+}
+
 function sniffDelim(text){
   const line = text.slice(0, 8000).split(/\r?\n/)[0] || "";
   let best = ",", bestN = -1;
@@ -377,7 +407,9 @@ function load(file){
       try {
         let grid;
         if (SRCKIND === "csv"){
-          grid = parseCSV(r.result);
+          const dec = decodeText(new Uint8Array(r.result));
+          ENCODING = dec.encoding;
+          grid = parseCSV(dec.text);
         } else {
           const wb = XLSX.read(new Uint8Array(r.result), { type:"array", cellDates:false, cellNF:false, cellStyles:false });
           const ws = wb.Sheets[wb.SheetNames[0]];
@@ -396,14 +428,15 @@ function load(file){
         $("#progress").hidden = true;
         $("#fileInfo").hidden = false;
         $("#fileInfo").innerHTML = "<b>" + file.name + "</b> — " + ROWS.length.toLocaleString() +
-          " data rows, " + w + " columns" + (SRCKIND === "csv" ? " (delimiter detected from the header line)" : "");
+          " data rows, " + w + " columns" +
+          (SRCKIND === "csv" ? " \u00b7 read as " + ENCODING + ", delimiter detected from the header line" : "");
         buildPickers();
       } catch (err) {
         fail("Could not read that file: " + err.message);
       }
     }, 30);
   };
-  if (SRCKIND === "csv") r.readAsText(file, "UTF-8"); else r.readAsArrayBuffer(file);
+  r.readAsArrayBuffer(file);
 }
 
 /* ---------- column pickers ---------- */
@@ -1199,6 +1232,7 @@ function runCollapse(){
     samples: out.samples, decidedAt: out.decidedAt,
     keys, tie, wsBlank, anyPfx: keys.some(c => PFX.has(c)),
     rulecfg: RULECFG.map(c => Object.assign({}, c)),
+    encoding: SRCKIND === "csv" ? ENCODING : null,
     unreadable: rules.map((r, i) => ({ level:i+1, type:r.type, col:r.col, n:r.unreadable || 0 }))
                      .filter(x => x.n > 0),
     chain: describeChain(RULECFG, shortColName),
@@ -1236,6 +1270,12 @@ function render(){
     : "No collisions, so no rule had to decide anything.";
 
   const h = [];
+  if (RESULT.encoding && RESULT.encoding !== "utf-8"){
+    h.push('This file is not UTF-8, so it was read as <b>' + esc(RESULT.encoding) +
+           '</b> — the encoding Excel on Windows writes for a plain .csv. Accented ' +
+           'characters were kept as they are. If any name looks wrong in the output, ' +
+           're-save the source as <b>CSV UTF-8</b> and run it again.');
+  }
   for (const u of RESULT.unreadable){
     h.push('Level <b>' + u.level + '</b> could not read <b>' + n(u.n) + ' cell' + (u.n === 1 ? '' : 's') +
            '</b> in ' + esc(HEADERS[u.col] || colLetter(u.col)) +
@@ -1312,7 +1352,7 @@ $("#dlSummary").addEventListener("click", () => {
   L.push("");
   L.push("SOURCE");
   L.push("  file base name .......... " + SRCNAME);
-  L.push("  format .................. " + SRCKIND);
+  L.push("  format .................. " + SRCKIND + (SRCKIND === "csv" ? " (" + ENCODING + ")" : ""));
   L.push("  columns ................. " + HEADERS.length);
   L.push("  data rows ............... " + s.rowsIn);
   L.push("");
