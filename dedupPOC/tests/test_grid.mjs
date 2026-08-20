@@ -106,3 +106,13 @@ test("column letters continue past Z", () => {
   assert.equal(G.colLetter(701), "ZZ");
   assert.equal(G.colLetter(702), "AAA");
 });
+
+test("NUL characters are stripped from cell values", () => {
+  // NUL is the separator the grouping keys are built from. A NUL inside a cell
+  // lets ("a\0b","c") and ("a","b\0c") build the same key, which would merge
+  // two genuinely different rows.
+  const Z = String.fromCharCode(0);
+  const t = G.gridToTable([["Id", "Name"], ["1", "An" + Z + "n"]]);
+  assert.equal(t.rows[0][1], "Ann");
+  assert.ok(!t.rows[0][1].includes(Z));
+});

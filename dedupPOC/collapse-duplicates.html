@@ -326,7 +326,16 @@ function gridToTable(grid){
     }
   }
   const width = last + 1;
-  const cell = (row, i) => { const v = row[i]; return v == null ? "" : String(v); };
+  // NUL is the separator the grouping keys are built from, so a NUL inside a
+  // cell would let two different rows build the same key. Spreadsheet text
+  // never legitimately contains one; strip it rather than leave the grouping
+  // invariant standing on an assumption about upstream decoding.
+  const cell = (row, i) => {
+    const v = row[i];
+    if (v == null) return "";
+    const t = String(v);
+    return t.indexOf("\u0000") === -1 ? t : t.replace(/\u0000/g, "");
+  };
   const headers = new Array(width);
   for (let i = 0; i < width; i++) headers[i] = kept.length ? cell(kept[0], i) : "";
   const rows = kept.slice(1).map(row => {
@@ -347,9 +356,31 @@ function gridToTable(grid){
    turns every accented character into U+FFFD, which can make two genuinely
    different values compare equal and get one of them deleted. Nothing in the
    output would look wrong, so this has to be settled before parsing. */
+/* TextDecoder has no UTF-32, and it is six lines to do properly. */
+function decodeUtf32(bytes, be){
+  let out = "";
+  for (let i = 0; i + 3 < bytes.length; i += 4){
+    const cp = be ? (bytes[i] << 24 | bytes[i+1] << 16 | bytes[i+2] << 8 | bytes[i+3]) >>> 0
+                  : (bytes[i+3] << 24 | bytes[i+2] << 16 | bytes[i+1] << 8 | bytes[i]) >>> 0;
+    if (cp > 0x10FFFF) return null;
+    out += String.fromCodePoint(cp);
+  }
+  return out;
+}
+
 function decodeText(bytes){
   if (!bytes.length) return { text:"", encoding:"utf-8" };
 
+  // UTF-32 before UTF-16: the UTF-32LE BOM is FF FE 00 00, which starts with
+  // the UTF-16LE BOM. Testing in the other order misreads every UTF-32 file.
+  if (bytes[0] === 0xFF && bytes[1] === 0xFE && bytes[2] === 0x00 && bytes[3] === 0x00){
+    const t = decodeUtf32(bytes.subarray(4), false);
+    if (t !== null) return { text:t, encoding:"utf-32le" };
+  }
+  if (bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0xFE && bytes[3] === 0xFF){
+    const t = decodeUtf32(bytes.subarray(4), true);
+    if (t !== null) return { text:t, encoding:"utf-32be" };
+  }
   if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF)
     return { text: new TextDecoder("utf-8").decode(bytes.subarray(3)), encoding:"utf-8" };
   if (bytes[0] === 0xFF && bytes[1] === 0xFE)
@@ -357,14 +388,37 @@ function decodeText(bytes){
   if (bytes[0] === 0xFE && bytes[1] === 0xFF)
     return { text: new TextDecoder("utf-16be").decode(bytes.subarray(2)), encoding:"utf-16be" };
 
-  // No BOM. Strict UTF-8 first: if the bytes are valid UTF-8 they are
-  // overwhelmingly likely to be UTF-8, since cp1252 text rarely satisfies it
-  // by accident. fatal:true is what makes this a decision rather than a guess.
+  // No BOM. A NUL byte proves this is not an 8-bit encoding -- but NUL is
+  // perfectly valid UTF-8, so a strict UTF-8 decode ACCEPTS UTF-16 text and
+  // hands back a string full of NULs. PowerShell's Out-File and > both write
+  // BOM-less UTF-16LE, so this is a real file class, not a curiosity. Settle
+  // it on the bytes before trusting any decoder.
+  const scan = Math.min(bytes.length, 1 << 20);
+  let nuls = 0, even = 0;
+  for (let i = 0; i < scan; i++){
+    if (bytes[i] === 0){ nuls++; if ((i & 1) === 0) even++; }
+  }
+  if (nuls){
+    const density = nuls / scan;
+    // Parity is only evidence once there are enough NULs to have a pattern.
+    // One NUL is always all-even or all-odd, which says nothing.
+    if (nuls >= 4 && density >= 0.1){
+      const evenShare = even / nuls;
+      // UTF-16BE puts the NUL of an ASCII pair first (even offset).
+      if (evenShare >= 0.9) return { text: new TextDecoder("utf-16be").decode(bytes), encoding:"utf-16be" };
+      if (evenShare <= 0.1) return { text: new TextDecoder("utf-16le").decode(bytes), encoding:"utf-16le" };
+      throw new Error("this file's encoding could not be determined — its NUL bytes fall in no consistent pattern. Re-save it as CSV UTF-8 and try again");
+    }
+    if (density >= 0.3){
+      // Dense NULs but too few to judge: binary, not text.
+      throw new Error("this does not look like a text file — re-save it as CSV UTF-8 and try again");
+    }
+    // A stray NUL in an otherwise ordinary file. Not an encoding signal.
+  }
+
   try {
     return { text: new TextDecoder("utf-8", { fatal:true }).decode(bytes), encoding:"utf-8" };
   } catch (e) {
-    // Not UTF-8. Fall back to the encoding Excel actually wrote, and let the
-    // caller tell the user which one was used.
     return { text: new TextDecoder("windows-1252").decode(bytes), encoding:"windows-1252" };
   }
 }
