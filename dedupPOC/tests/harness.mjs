@@ -83,3 +83,18 @@ export function loadPresets(){
 export function loadProfile(){
   return exportsOf(region("profile"), ["profileColumn", "profileFlag", "shapeWord"]);
 }
+
+/* Load the rules region out of an arbitrary copy of the page, so the working
+   tree can be compared against a known-good reference (usually git HEAD). */
+export function loadRulesFromSource(html){
+  const begin = "/* ==== rules:begin ==== */";
+  const end = "/* ==== rules:end ==== */";
+  const a = html.indexOf(begin), b = html.indexOf(end);
+  if (a === -1 || b === -1) throw new Error("no rules region in that source");
+  const names = ["collapseRows", "buildRules", "pickWinner", "makeNorm",
+                 "makeHasValueRule", "makeCountRule", "makeNumberRule",
+                 "makeDateRule", "makeTextRule"];
+  const fields = names.map(n => `${n}: typeof ${n} === "function" ? ${n} : undefined`).join(",");
+  return new Function('"use strict";' + html.slice(a + begin.length, b) +
+                      "\nreturn {" + fields + "};")();
+}
