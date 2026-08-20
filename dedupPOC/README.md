@@ -50,14 +50,40 @@ Type the prefix exactly as it appears in the data. Leave the box empty for colum
 
 The prefix is only ignored **when comparing**. It is never deleted from your data — if the row that survives happens to carry the prefix, it keeps it.
 
-## Step 5 — Choose the tiebreak column
+## Step 5 — Set the survivor rules
 
-When rows collide, the tool keeps one of them and drops the rest. It decides like this:
+When rows collide, the tool keeps one of them and drops the rest. You decide which, by building a list of rules.
 
-1. If any of the colliding rows has a value in the tiebreak column, keep the **last** of those rows.
-2. If none of them has a value there, keep the **last** row of the group.
+The rules run **in order**. The first rule looks at every row in the group and keeps only the best ones. If that leaves a single row, it wins. If it leaves several tied, the second rule looks at just those, and so on. If the rules run out and rows are still tied, the **last row in the file** wins.
 
-"Last" means furthest down in your original file.
+That last line never changes and cannot be removed. It is what guarantees the tool always picks exactly one row.
+
+### The kinds of rule
+
+| Rule | What it does |
+|---|---|
+| **Carries a value** | A row with something in the chosen column beats a row without. This is the old tiebreak behaviour. |
+| **Earliest / latest date** | Compares dates in the chosen column. |
+| **Lowest / highest number** | Compares numbers in the chosen column, ignoring any prefix you name. |
+| **Most values filled** | Counts how many of several columns a row actually fills, and keeps the fullest. |
+
+Use **Add a rule** to add a level, the arrows to reorder, and **×** to remove. Underneath, the tool restates your whole chain as a sentence. Read it. It is the fastest way to catch a rule in the wrong order.
+
+### About dates
+
+The tool works out the date format by looking at the column. If it finds a day above 12 it knows the format is day-first; a month slot above 12 means month-first.
+
+If nothing in the column settles it — every value could be read either way, like `04/03/2026` — the tool **stops and asks**. It will not guess. Picking wrong would silently keep the wrong rows, and nothing in the output would look unusual.
+
+A column of plain numbers like `46085` may be Excel dates that lost their formatting. The tool offers **Excel serial number** but never chooses it for you, because those are indistinguishable from ordinary numbers.
+
+### About numbers with prefixes
+
+Type the prefix into the rule's **Ignore prefix** box, exactly as it appears. `INV-000123` with `INV-` ignored compares as **123**.
+
+Type it in even if it looks obvious. Without it the tool has to guess where the number starts, and `INV-000123` reads as **minus** 123 — which would win "lowest" every time.
+
+Cells the rule cannot read as a number are passed over, not counted as zero. An empty cell never wins "lowest".
 
 ## Step 6 — Run it
 
@@ -71,11 +97,13 @@ Click **Collapse duplicates**. On a large file this takes a few seconds.
 |---|---|
 | **Rows in / Rows removed / Rows out** | The arithmetic. Rows in minus rows removed should equal rows out. |
 | **Colliding groups** | How many sets of duplicate rows were found. |
-| **Tiebreak overrode order** | Groups where the last row was *not* the one kept, because an earlier row had a tiebreak value. |
+| **Rules overrode order** | Groups where the last row was *not* the one kept, because a rule chose an earlier one. |
 | **Groups joined by prefix** | Collisions that only exist because a prefix was ignored. If this looks wrong, the prefix you typed is probably wrong. |
 | **Near-miss keys** | Values that would have matched if capitals and spacing were ignored — but they weren't, so these rows were **left alone**. A high number means the source data is inconsistent. |
 
-Below the numbers, the **collision inspector** shows real examples: each group of duplicate rows, which one was kept, and why. Read a few. This is the quickest way to confirm the rule is doing what you expect before you trust the whole file.
+Under the numbers, a line shows **which rule decided each collision** — how many groups each level settled, and how many fell all the way through to file order. If a level decided nothing, it is doing no work and can probably come out.
+
+Below that, the **collision inspector** shows real examples: each group of duplicate rows, which one was kept, and why. Read a few. This is the quickest way to confirm the rule is doing what you expect before you trust the whole file.
 
 Anything the tool thinks is worth a second look appears in a highlighted box above the inspector.
 
@@ -109,6 +137,31 @@ You should get:
 ```
 
 If those numbers match, the tool arrived intact and is working correctly.
+
+### Then try the rules
+
+`sample_rules.csv` is 15 rows built so every kind of rule gets used, and one group defeats all of them.
+
+Match on `ref_id` and `site_code`. Then build three rules, in this order:
+
+1. **Latest** date on `service_date`
+2. **Lowest** number on `invoice_no`, ignoring prefix `INV-`
+3. **Most values filled** across `phone`, `email` and `address`
+
+You should get:
+
+```
+15 rows in           7 rows removed          8 rows out
+5 colliding groups   1 unreadable date cell
+```
+
+and the decided-by line should read:
+
+```
+rule 1 -> 2 groups    rule 2 -> 1 group    rule 3 -> 1 group    file order -> 1 group
+```
+
+That spread is the point. Every level does real work, and one group ties all the way down to the fallback. If the counts match but the spread does not, your rules are in the wrong order.
 
 ---
 
