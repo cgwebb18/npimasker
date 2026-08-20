@@ -149,3 +149,22 @@ test("loading a second file clears the first file's result and rules", () => {
   assert.equal(p.RULECFG.length, 1, "rules are rebuilt for the new file");
   assert.equal(p.RULECFG[0].type, "hasvalue", "and reset to the default");
 });
+
+test("a failed .xlsx write reports itself instead of doing nothing", () => {
+  const p = boot();
+  p.keySet.add(0); p.keySet.add(1);
+  p.RULECFG = [{ type: "hasvalue", col: 4, dir: +1 }];
+  p.syncPick();
+  p.runCollapse();
+  // the shim's XLSX.write throws, standing in for the 128MiB ceiling
+  p.el("dlClean").fire("click");
+  assert.equal(p.el("dlErr").hidden, false, "the user must be told");
+  assert.match(p.el("dlErr").textContent, /\.csv button instead/,
+    "and pointed at the export that actually works at this size");
+});
+
+test("removed rows can be exported as CSV, not only as xlsx", () => {
+  const p = boot();
+  assert.ok(p.el("dlRemovedCsv").listeners.click,
+    "above the xlsx ceiling this is the only way to get the audit file");
+});

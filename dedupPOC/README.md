@@ -114,7 +114,7 @@ Anything the tool thinks is worth a second look appears in a highlighted box abo
 | File | Contains | Where it goes |
 |---|---|---|
 | **Cleaned rows** (`.xlsx` or `.csv`) | Your data with duplicates removed | Stays on your machine |
-| **Removed rows** (`.xlsx`) | Every row that was dropped, so you can check them | Stays on your machine |
+| **Removed rows** (`.xlsx` or `.csv`) | Every row that was dropped, so you can check them | Stays on your machine |
 | **Run summary** (`.txt`) | Counts, column names and the rule that was applied — **no cell values from any row** | Safe to email out |
 
 The summary is the one file that can be shared. Open it in Notepad first and confirm you're happy with what's in it.
@@ -174,6 +174,8 @@ That spread is the point. Every level does real work, and one group ties all the
 **Accented names look wrong.** The tool works out the encoding from the file itself and tells you which one it used, next to the row count. Excel's plain **CSV (Comma delimited)** is not UTF-8 — it is Windows-1252 — and the tool reads it correctly either way. If a name still looks wrong, re-save the source as **CSV UTF-8** and run it again.
 
 **The browser says the page is unresponsive.** Writing a very large `.xlsx` can take 10–20 seconds. Wait, or use the `.csv` download button instead — it's much faster.
+
+**A download says the file is too large for `.xlsx`.** There is a hard ceiling on how much a browser can write into one `.xlsx`. Use the `.csv` button next to it, which handles far more and is much faster. Both hold the same rows.
 
 **Fewer duplicates removed than expected.** Look at the near-miss count. The tool matches exactly, so inconsistent spacing or capitals in the source data will leave rows uncollapsed. That's the setting behaving as specified, not a fault.
 

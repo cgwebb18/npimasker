@@ -274,8 +274,10 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
         <button class="btn" id="dlClean">Cleaned rows (.xlsx)</button>
         <button class="btn ghost" id="dlCleanCsv">Cleaned rows (.csv)</button>
         <button class="btn ghost" id="dlRemoved">Removed rows (.xlsx)</button>
+        <button class="btn ghost" id="dlRemovedCsv">Removed rows (.csv)</button>
       </div>
-      <div class="dlnote">Both of the above hold real data — keep them on this machine.</div>
+      <div class="dlnote">All of the above hold real data — keep them on this machine.</div>
+      <div id="dlErr" class="err" hidden></div>
       <div class="btnrow" style="margin-top:16px">
         <button class="btn ghost" id="dlSummary">Run summary (.txt)</button>
       </div>
@@ -1477,17 +1479,41 @@ function saveBlob(blob, name){
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
 }
 function saveXlsx(rows, name, sheet){
-  const aoa = [HEADERS, ...rows];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, sheet);
-  const buf = XLSX.write(wb, { bookType:"xlsx", type:"array" });
-  saveBlob(new Blob([buf], { type:"application/octet-stream" }), name);
+  $("#dlErr").hidden = true;
+  try {
+    const aoa = [HEADERS, ...rows];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sheet);
+    // Without compression SheetJS writes a stored (uncompressed) zip, and its
+    // writer throws once that reaches 128MiB -- around 2.8 million cells,
+    // regardless of how much memory is free. Compressing moves that ceiling
+    // past Excel's own 1,048,576-row limit.
+    const buf = XLSX.write(wb, { bookType:"xlsx", type:"array", compression:true });
+    saveBlob(new Blob([buf], { type:"application/octet-stream" }), name);
+  } catch (e) {
+    // This used to throw into the console: the button appeared to do nothing,
+    // after the user had already waited through the whole run.
+    dlFail("That is too large to write as .xlsx (" + rows.length.toLocaleString() +
+           " rows). Use the .csv button instead — it handles far more and is much faster.");
+  }
+}
+function dlFail(msg){
+  const e = $("#dlErr"); e.hidden = false; e.textContent = msg;
+}
+function saveCsv(rows, name){
+  $("#dlErr").hidden = true;
+  try {
+    saveBlob(new Blob([toCSV(HEADERS, rows)], { type:"text/csv;charset=utf-8" }), name);
+  } catch (e) {
+    dlFail("That is too large to write in one piece (" + rows.length.toLocaleString() +
+           " rows). Split the source file and run it in parts.");
+  }
 }
 $("#dlClean").addEventListener("click", () => saveXlsx(RESULT.kept, SRCNAME + "_cleaned.xlsx", "cleaned"));
 $("#dlRemoved").addEventListener("click", () => saveXlsx(RESULT.gone, SRCNAME + "_removed.xlsx", "removed"));
-$("#dlCleanCsv").addEventListener("click", () =>
-  saveBlob(new Blob([toCSV(HEADERS, RESULT.kept)], { type:"text/csv;charset=utf-8" }), SRCNAME + "_cleaned.csv"));
+$("#dlCleanCsv").addEventListener("click", () => saveCsv(RESULT.kept, SRCNAME + "_cleaned.csv"));
+$("#dlRemovedCsv").addEventListener("click", () => saveCsv(RESULT.gone, SRCNAME + "_removed.csv"));
 
 $("#dlSummary").addEventListener("click", () => {
   const s = RESULT.stats, L = [];

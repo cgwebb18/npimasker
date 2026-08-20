@@ -86,8 +86,18 @@ export function bootPage(){
       get RESULT(){ return RESULT; },
     };`;
 
-  const fn = new Function("document", "window", "XLSX", "__byId", js + epilogue);
-  const api = fn(document, { }, { utils:{}, write(){}, read(){} }, el);
+  const XLSX = {
+    utils: {
+      aoa_to_sheet: () => ({}), book_new: () => ({}), book_append_sheet(){},
+      decode_range: () => ({ s:{r:0,c:0}, e:{r:0,c:0} }),
+      decode_cell: () => ({ r:0, c:0 }), encode_range: () => "A1:A1",
+    },
+    write(){ throw new RangeError("Invalid array length"); },
+    read(){ return { SheetNames:[], Sheets:{} }; },
+  };
+  const win = { URL: { createObjectURL: () => "blob:stub", revokeObjectURL(){} } };
+  const fn = new Function("document", "window", "XLSX", "URL", "Blob", "setTimeout", "__byId", js + epilogue);
+  const api = fn(document, win, XLSX, win.URL, function Blob(){}, () => 0, el);
   api.byId = byId;
   return api;
 }
