@@ -42,8 +42,8 @@ test("the add-rule button appends a level", () => {
 test("each rule renders a row carrying its level number", () => {
   const p = boot();
   p.RULECFG = [
-    { type: "date", col: 2, dir: +1, format: "iso" },
-    { type: "number", col: 3, dir: -1, prefixes: ["INV-"], decimal: "us", mode: "strict" },
+    { type:"minmax", parse:"date", dir:"max", field:2, fmt:"ISO" },
+    { type:"minmax", parse:"number", dir:"min", field:3, strip:"prefix", pfx:"INV-" },
   ];
   p.renderRules();
   const labels = p.el("ruleList").findAll(e => e.className === "rule-lvl").map(e => e.textContent);
@@ -53,22 +53,22 @@ test("each rule renders a row carrying its level number", () => {
 test("the chain sentence names every level and ends with the fallback", () => {
   const p = boot();
   p.RULECFG = [
-    { type: "date", col: 2, dir: +1, format: "iso" },
-    { type: "number", col: 3, dir: -1, prefixes: ["INV-"], decimal: "us", mode: "strict" },
-    { type: "complete", cols: [4, 5], dir: +1 },
+    { type:"minmax", parse:"date", dir:"max", field:2, fmt:"ISO" },
+    { type:"minmax", parse:"number", dir:"min", field:3, strip:"prefix", pfx:"INV-" },
+    { type:"count", dir:"max", fields:[4, 5], counts:"filled" },
   ];
   p.renderRules();
   const text = p.el("ruleChain").innerHTML;
-  assert.match(text, /latest service_date/);
+  assert.match(text, /newest service_date/);
   assert.match(text, /lowest invoice_no/);
-  assert.match(text, /most of 2 columns/);
+  assert.match(text, /most columns filled across 2/);
   assert.match(text, /nearest the top of the file/, "the fallback is always shown");
 });
 
-test("a completeness rule with no columns blocks the run and says why", () => {
+test("a counting rule with no columns blocks the run and says why", () => {
   const p = boot();
   p.keySet.add(0);
-  p.RULECFG = [{ type: "complete", cols: [], dir: +1 }];
+  p.RULECFG = [{ type:"count", dir:"max", fields:[], counts:"above-zero" }];
   p.syncPick();
   assert.equal(p.el("run").disabled, true);
   assert.equal(p.el("ruleErr").hidden, false);
@@ -80,7 +80,7 @@ test("an ambiguous date column blocks the run rather than guessing", () => {
   p.setData(["id", "when"], [["1", "04/03/2026"], ["2", "05/06/2026"]]);
   p.buildPickers();
   p.keySet.add(0);
-  p.RULECFG = [{ type: "date", col: 1, dir: +1 }];
+  p.RULECFG = [{ type:"minmax", parse:"date", dir:"max", field:1 }];
   p.renderRules();
   p.syncPick();
   assert.equal(p.el("run").disabled, true);
@@ -92,10 +92,10 @@ test("an unambiguous date column resolves itself and allows the run", () => {
   p.setData(["id", "when"], [["1", "27/11/2026"], ["2", "04/03/2026"]]);
   p.buildPickers();
   p.keySet.add(0);
-  p.RULECFG = [{ type: "date", col: 1, dir: +1 }];
+  p.RULECFG = [{ type:"minmax", parse:"date", dir:"max", field:1 }];
   p.renderRules();
   p.syncPick();
-  assert.equal(p.RULECFG[0].format, "dmy", "day-first, proved by 27");
+  assert.equal(p.RULECFG[0].fmt, "DMY", "day-first, proved by 27");
   assert.equal(p.el("run").disabled, false);
   assert.equal(p.el("ruleErr").hidden, true);
 });
@@ -104,8 +104,8 @@ test("running a two-level chain produces the expected survivors", () => {
   const p = boot();
   p.keySet.add(0); p.keySet.add(1);
   p.RULECFG = [
-    { type: "date", col: 2, dir: +1, format: "iso" },
-    { type: "number", col: 3, dir: -1, prefixes: ["INV-"], decimal: "us", mode: "strict" },
+    { type:"minmax", parse:"date", dir:"max", field:2, fmt:"ISO" },
+    { type:"minmax", parse:"number", dir:"min", field:3, strip:"prefix", pfx:"INV-" },
   ];
   p.syncPick();
   assert.equal(p.el("run").disabled, false);
@@ -124,21 +124,21 @@ test("the result panel reports which rule decided each collision", () => {
   const p = boot();
   p.keySet.add(0); p.keySet.add(1);
   p.RULECFG = [
-    { type: "date", col: 2, dir: +1, format: "iso" },
-    { type: "number", col: 3, dir: -1, prefixes: ["INV-"], decimal: "us", mode: "strict" },
+    { type:"minmax", parse:"date", dir:"max", field:2, fmt:"ISO" },
+    { type:"minmax", parse:"number", dir:"min", field:3, strip:"prefix", pfx:"INV-" },
   ];
   p.syncPick();
   p.runCollapse();
   const attrib = p.el("attrib").innerHTML;
   assert.match(attrib, /Which rule decided/);
-  assert.match(attrib, /latest service_date/);
+  assert.match(attrib, /newest service_date/);
   assert.match(attrib, /lowest invoice_no/);
 });
 
 test("loading a second file clears the first file's result and rules", () => {
   const p = boot();
   p.keySet.add(0); p.keySet.add(1);
-  p.RULECFG = [{ type: "date", col: 2, dir: +1, format: "iso" }];
+  p.RULECFG = [{ type:"minmax", parse:"date", dir:"max", field:2, fmt:"ISO" }];
   p.syncPick();
   p.runCollapse();
   assert.ok(p.RESULT, "a result exists");
@@ -153,7 +153,7 @@ test("loading a second file clears the first file's result and rules", () => {
 test("a failed .xlsx write reports itself instead of doing nothing", () => {
   const p = boot();
   p.keySet.add(0); p.keySet.add(1);
-  p.RULECFG = [{ type: "hasvalue", col: 4, dir: +1 }];
+  p.RULECFG = [{ type:"hasvalue", field:4 }];
   p.syncPick();
   p.runCollapse();
   // the shim's XLSX.write throws, standing in for the 128MiB ceiling
@@ -167,4 +167,25 @@ test("removed rows can be exported as CSV, not only as xlsx", () => {
   const p = boot();
   assert.ok(p.el("dlRemovedCsv").listeners.click,
     "above the xlsx ceiling this is the only way to get the audit file");
+});
+
+test("a criterion can be switched off and back on from the rule row", () => {
+  const p = boot();
+  p.RULECFG = [{ type:"minmax", parse:"text", dir:"min", field:3 }];
+  p.renderRules();
+  const sw = p.el("ruleList").find(e => e.textContent === "on");
+  assert.ok(sw, "the row carries an on/off switch");
+  sw.fire("click");
+  assert.equal(p.RULECFG[0].on, false, "kept in the list, not run");
+  assert.match(p.el("ruleChain").innerHTML, /\(off\)/, "and the chain says so");
+});
+
+test("a switched-off criterion is not validated", () => {
+  const p = boot();
+  p.keySet.add(0);
+  // no columns chosen would normally block the run
+  p.RULECFG = [{ type:"count", dir:"max", fields:[], counts:"above-zero", on:false },
+               { type:"hasvalue", field:4 }];
+  p.syncPick();
+  assert.equal(p.el("run").disabled, false, "an inactive rule cannot be invalid");
 });

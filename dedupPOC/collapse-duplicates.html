@@ -603,7 +603,7 @@ function buildPickers(){
     });
     box.appendChild(b);
   });
-  RULECFG = [{ type:"hasvalue", col: HEADERS.length > 1 ? 1 : 0, dir:+1 }];
+  RULECFG = [{ type:"hasvalue", field: HEADERS.length > 1 ? 1 : 0, on:true }];
   DATEFMT.clear();
   renderRules();
   $("#mapStep").hidden = false;
@@ -613,11 +613,13 @@ function buildPickers(){
 /* ---------- the rule builder ---------- */
 
 const RULE_TYPES = [
-  ["hasvalue", "Carries a value"],
-  ["date",     "Earliest / latest date"],
-  ["number",   "Lowest / highest number"],
-  ["complete", "Most values filled"],
+  ["hasvalue",     "Carries a value"],
+  ["minmax:date",  "Oldest / newest date"],
+  ["minmax:number","Lowest / highest number"],
+  ["minmax:text",  "First / last alphabetically"],
+  ["count",        "Counting across columns"],
 ];
+const cfgKind = c => c.type === "minmax" ? "minmax:" + c.parse : c.type;
 const DATEFMT = new Map();   // column -> detectDateFormat() result, cached per file
 
 function colName(i){ return colLetter(i) + " — " + headerLabel(HEADERS, i); }
@@ -667,25 +669,23 @@ function renderRules(){
     lvl.className = "rule-lvl"; lvl.textContent = "LEVEL " + (n + 1);
     top.appendChild(lvl);
 
-    top.appendChild(pickSelect(RULE_TYPES, cfg.type, v => {
-      RULECFG[n] = defaultCfg(v, cfg.col);
+    top.appendChild(pickSelect(RULE_TYPES, cfgKind(cfg), v => {
+      RULECFG[n] = defaultCfg(v, cfg.field);
       renderRules(); syncPick();
     }));
 
-    if (cfg.type !== "complete"){
-      top.appendChild(colSelect(cfg.col, v => { cfg.col = v; renderRules(); syncPick(); }));
+    if (cfg.type !== "count"){
+      top.appendChild(colSelect(cfg.field, v => { cfg.field = v; renderRules(); syncPick(); }));
     }
-    if (cfg.type === "date"){
-      top.appendChild(pickSelect([["1","Keep the latest"],["-1","Keep the earliest"]],
-        String(cfg.dir), v => { cfg.dir = +v; syncPick(); }));
-    }
-    if (cfg.type === "number"){
-      top.appendChild(pickSelect([["-1","Keep the lowest"],["1","Keep the highest"]],
-        String(cfg.dir), v => { cfg.dir = +v; syncPick(); }));
-    }
-    if (cfg.type === "complete"){
-      top.appendChild(pickSelect([["1","Keep the most complete"],["-1","Keep the least complete"]],
-        String(cfg.dir), v => { cfg.dir = +v; syncPick(); }));
+    const DIRS = {
+      "minmax:date":  [["min","Keep the oldest"],["max","Keep the newest"]],
+      "minmax:number":[["min","Keep the lowest"],["max","Keep the highest"]],
+      "minmax:text":  [["min","Keep the first A–Z"],["max","Keep the last A–Z"]],
+      "count":        [["max","Keep the highest count"],["min","Keep the lowest count"]],
+    };
+    if (DIRS[cfgKind(cfg)]){
+      top.appendChild(pickSelect(DIRS[cfgKind(cfg)], cfg.dir === "min" ? "min" : "max",
+        v => { cfg.dir = v; syncPick(); }));
     }
 
     const spacer = document.createElement("span");
@@ -703,6 +703,13 @@ function renderRules(){
     dn.addEventListener("click", () => {
       RULECFG.splice(n + 1, 0, RULECFG.splice(n, 1)[0]); renderRules(); syncPick();
     });
+    const sw = document.createElement("button");
+    sw.className = "rule-x"; sw.type = "button";
+    sw.textContent = ruleIsOn(cfg) ? "on" : "off";
+    sw.title = ruleIsOn(cfg) ? "Switch this criterion off without removing it" : "Switch it back on";
+    sw.addEventListener("click", () => { cfg.on = !ruleIsOn(cfg); renderRules(); syncPick(); });
+    top.appendChild(sw);
+
     const rm = document.createElement("button");
     rm.className = "rule-x"; rm.type = "button"; rm.textContent = "\u00d7";
     rm.title = "Remove this rule"; rm.disabled = RULECFG.length === 1;
@@ -710,41 +717,63 @@ function renderRules(){
     top.appendChild(up); top.appendChild(dn); top.appendChild(rm);
     box.appendChild(top);
 
-    if (cfg.type === "number") box.appendChild(numberCfgRow(cfg));
-    if (cfg.type === "date")   box.appendChild(dateCfgRow(cfg));
-    if (cfg.type === "complete") box.appendChild(completeCfgRow(cfg));
+    if (cfg.type === "minmax" && cfg.parse === "number") box.appendChild(numberCfgRow(cfg));
+    if (cfg.type === "minmax" && cfg.parse === "date")   box.appendChild(dateCfgRow(cfg));
+    if (cfg.type === "minmax" && cfg.parse === "text")   box.appendChild(stripCfgRow(cfg));
+    if (cfg.type === "count")  box.appendChild(countCfgRow(cfg));
 
     list.appendChild(box);
   });
   renderChain();
 }
 
-function defaultCfg(type, col){
-  const c = { type, col: col || 0, dir: +1 };
-  if (type === "number"){ c.dir = -1; c.prefixes = []; c.decimal = "us"; c.mode = "strict"; }
-  if (type === "complete"){ c.cols = []; }
+function defaultCfg(kind, col){
+  const field = col || 0;
+  if (kind === "hasvalue") return { type:"hasvalue", field:field, on:true };
+  if (kind === "count")    return { type:"count", dir:"max", fields:[], counts:"above-zero", on:true };
+  const parse = kind.split(":")[1];
+  const c = { type:"minmax", parse:parse, dir:"min", field:field, strip:"none", pfx:"", on:true };
+  if (parse === "number") c.decimal = "us";
   return c;
 }
 
+/* How a criterion reads past a prefix -- shared by every minmax parse. */
+function stripControls(cfg, row){
+  row.appendChild(pickSelect([
+    ["none",   "Read the whole cell"],
+    ["prefix", "Ignore a prefix I name"],
+    ["digits", "Start at the first digit"],
+  ], cfg.strip || "none", v => { cfg.strip = v; renderRules(); syncPick(); }));
+
+  if ((cfg.strip || "none") === "prefix"){
+    const pl = document.createElement("label");
+    pl.appendChild(document.createTextNode("Prefix"));
+    const pin = document.createElement("input");
+    pin.type = "text"; pin.placeholder = "e.g. INV-  (comma-separated)";
+    pin.value = cfg.pfx || "";
+    pin.addEventListener("input", () => { cfg.pfx = pin.value; syncPick(); });
+    pl.appendChild(pin); row.appendChild(pl);
+  }
+}
+function stripCfgRow(cfg){
+  const row = document.createElement("div");
+  row.className = "rule-cfg";
+  stripControls(cfg, row);
+  return row;
+}
 function numberCfgRow(cfg){
   const row = document.createElement("div");
   row.className = "rule-cfg";
-
-  const pl = document.createElement("label");
-  pl.appendChild(document.createTextNode("Ignore prefix"));
-  const pin = document.createElement("input");
-  pin.type = "text"; pin.placeholder = "e.g. INV-  (comma-separated)";
-  pin.value = (cfg.prefixes || []).join(", ");
-  pin.addEventListener("input", () => {
-    cfg.prefixes = pin.value.split(",").map(s => s.trim()).filter(s => s.length);
-    syncPick();
-  });
-  pl.appendChild(pin); row.appendChild(pl);
-
+  stripControls(cfg, row);
   row.appendChild(pickSelect([["us","1,234.56"],["eu","1.234,56"]], cfg.decimal || "us",
     v => { cfg.decimal = v; syncPick(); }));
-  row.appendChild(pickSelect([["strict","Whole cell is the number"],["auto","Find the first number"]],
-    cfg.mode || "strict", v => { cfg.mode = v; syncPick(); }));
+
+  const zl = document.createElement("label");
+  const zc = document.createElement("input");
+  zc.type = "checkbox"; zc.checked = !!cfg.zero;
+  zc.addEventListener("change", () => { cfg.zero = zc.checked; syncPick(); });
+  zl.appendChild(zc); zl.appendChild(document.createTextNode("Empty counts as 0"));
+  row.appendChild(zl);
 
   const al = document.createElement("label");
   const ac = document.createElement("input");
@@ -754,20 +783,19 @@ function numberCfgRow(cfg){
   row.appendChild(al);
   return row;
 }
-
 function dateCfgRow(cfg){
   const row = document.createElement("div");
   row.className = "rule-cfg";
-  const info = dateInfo(cfg.col);
+  const info = dateInfo(cfg.field);
 
-  const OPTS = [["iso","2026-03-04"],["dmy","04/03/2026 \u2014 day first"],
-                ["mdy","03/04/2026 \u2014 month first"],["mon","4-Mar-2026"],
-                ["serial","Excel serial number"]];
+  const OPTS = [["ISO","2026-03-04"],["DMY","04/03/2026 \u2014 day first"],
+                ["MDY","03/04/2026 \u2014 month first"],["MON","4-Mar-2026"],
+                ["SERIAL","Excel serial number"]];
 
-  if (info.status === "ok" && !cfg.format) cfg.format = info.format;
+  if (info.status === "ok" && !cfg.fmt) cfg.fmt = FMT_NAME[info.format] || info.format;
   const lab = document.createElement("label");
   lab.appendChild(document.createTextNode("Date format"));
-  lab.appendChild(pickSelect(OPTS, cfg.format || "", v => { cfg.format = v; renderRules(); syncPick(); }));
+  lab.appendChild(pickSelect(OPTS, cfg.fmt || "", v => { cfg.fmt = v; renderRules(); syncPick(); }));
   row.appendChild(lab);
 
   const note = document.createElement("div");
@@ -796,31 +824,44 @@ function dateCfgRow(cfg){
   return row;
 }
 
-function completeCfgRow(cfg){
+function countCfgRow(cfg){
   const wrap = document.createElement("div");
+  const row = document.createElement("div");
+  row.className = "rule-cfg";
+  row.appendChild(pickSelect([
+    ["above-zero", "Count fields above zero"],
+    ["filled",     "Count fields with anything in them"],
+  ], cfg.counts || "above-zero", v => { cfg.counts = v; renderRules(); syncPick(); }));
+  const note = document.createElement("div");
+  note.className = "rule-note";
+  note.textContent = (cfg.counts || "above-zero") === "above-zero"
+    ? "A cell holding 0 does not count, and neither does text that is not a number."
+    : "Any cell with something in it counts, including a 0.";
+  row.appendChild(note);
+  wrap.appendChild(row);
+
   const lab = document.createElement("div");
   lab.className = "rule-note";
-  lab.textContent = "Count how many of these columns each row fills:";
+  lab.textContent = "Across these columns:";
   wrap.appendChild(lab);
   const cols = document.createElement("div");
   cols.className = "rule-cols";
-  cfg.cols = cfg.cols || [];
+  cfg.fields = cfg.fields || [];
   HEADERS.forEach((h, i) => {
-    const b = document.createElement("div");
-    b.className = "chip" + (cfg.cols.indexOf(i) !== -1 ? " on" : "");
-    b.innerHTML = '<span class="ix">' + colLetter(i) + '</span>' + esc(headerLabel(HEADERS, i));
-    b.addEventListener("click", () => {
-      const at = cfg.cols.indexOf(i);
-      if (at === -1) cfg.cols.push(i); else cfg.cols.splice(at, 1);
-      cfg.cols.sort((a, b2) => a - b2);
+    const el = document.createElement("div");
+    el.className = "chip" + (cfg.fields.indexOf(i) !== -1 ? " on" : "");
+    el.innerHTML = '<span class="ix">' + colLetter(i) + '</span>' + esc(headerLabel(HEADERS, i));
+    el.addEventListener("click", () => {
+      const at = cfg.fields.indexOf(i);
+      if (at === -1) cfg.fields.push(i); else cfg.fields.splice(at, 1);
+      cfg.fields.sort((x, y) => x - y);
       renderRules(); syncPick();
     });
-    cols.appendChild(b);
+    cols.appendChild(el);
   });
   wrap.appendChild(cols);
   return wrap;
 }
-
 function renderChain(){
   const parts = describeChain(RULECFG, shortColName);
   const html = parts.map((p, i) => '<b>' + (i + 1) + '.</b> ' + esc(p)).join(' &nbsp;\u00b7&nbsp; ') +
@@ -830,7 +871,7 @@ function renderChain(){
 }
 
 $("#addRule").addEventListener("click", () => {
-  const used = new Set(RULECFG.map(c => c.col));
+  const used = new Set(RULECFG.map(c => c.field));
   let col = 0;
   for (let i = 0; i < HEADERS.length; i++) if (!used.has(i) && !keySet.has(i)){ col = i; break; }
   RULECFG.push(defaultCfg("hasvalue", col));
@@ -842,13 +883,14 @@ function ruleProblems(){
   const out = [];
   RULECFG.forEach((c, n) => {
     const at = "Level " + (n + 1) + ": ";
-    if (c.type === "complete" && (!c.cols || !c.cols.length))
+    if (!ruleIsOn(c)) return;                     // switched off; nothing to validate
+    if (c.type === "count" && (!c.fields || !c.fields.length))
       out.push(at + "choose at least one column to count.");
-    if (c.type === "date"){
-      const info = dateInfo(c.col);
-      if (!c.format) out.push(at + "choose the date format for " + shortColName(c.col) + ".");
+    if (c.type === "minmax" && c.parse === "date"){
+      const info = dateInfo(c.field);
+      if (!c.fmt) out.push(at + "choose the date format for " + shortColName(c.field) + ".");
       else if (info.status === "contradictory")
-        out.push(at + shortColName(c.col) + " mixes day-first and month-first dates.");
+        out.push(at + shortColName(c.field) + " mixes day-first and month-first dates.");
     }
   });
   return out;
@@ -884,7 +926,7 @@ function currentNorm(){
 function syncPick(){
   renderChain();
   const problems = ruleProblems();
-  const overlap = RULECFG.filter(c => c.type !== "complete" && keySet.has(c.col)).length;
+  const overlap = RULECFG.filter(c => c.type !== "count" && keySet.has(c.field)).length;
   $("#pickCount").textContent = keySet.size + " match column" + (keySet.size === 1 ? "" : "s") +
     " selected \u00b7 " + RULECFG.length + " rule" + (RULECFG.length === 1 ? "" : "s") +
     (overlap ? " \u00b7 " + overlap + " rule" + (overlap === 1 ? " sits" : "s sit") + " on a match column" : "");
@@ -986,25 +1028,34 @@ function makeHasValueRule(cellAt, col, wsBlank){
 
 /* --- completeness: how many of these columns does the row actually fill? --- */
 
-function makeCompletenessRule(cellAt, n, cols, opts){
+/* Counting across a set of columns. Two different questions live here:
+   "filled" asks whether the cell has anything in it, "above-zero" asks whether
+   it holds a number greater than zero. A cell holding "0" answers those
+   differently, which is exactly why both are offered. */
+function makeCountRule(cellAt, n, cols, opts){
   const wsBlank = opts.wsBlank !== false;
+  const aboveZero = (opts.counts || "above-zero") === "above-zero";
   const vec = new Uint16Array(n);           // scored once, not per group
   for (let i = 0; i < n; i++){
-    let filled = 0;
+    let hits = 0;
     for (const c of cols){
       const v = cellAt(i, c);
-      if ((wsBlank ? v.trim().length : v.length) > 0) filled++;
+      if (aboveZero){
+        const t = v.trim();
+        if (t.length && /^-?\d+(\.\d+)?$/.test(t) && Number(t) > 0) hits++;
+      } else if ((wsBlank ? v.trim().length : v.length) > 0) hits++;
     }
-    vec[i] = filled;
+    vec[i] = hits;
   }
   return {
-    type: "complete", dir: opts.dir === -1 ? -1 : +1, cols,
+    type: "count", dir: opts.dir === -1 ? -1 : +1, cols, counts: aboveZero ? "above-zero" : "filled",
     score(i){ return vec[i]; },             // always a number, never null
     reason(outcome){
       const most = (opts.dir === -1) ? "fewest" : "most";
-      if (outcome === "narrowed") return "Kept the row filling the " + most + " of the chosen columns.";
-      if (outcome === "tied") return "Every row fills the same number of those columns — the one nearest the top wins.";
-      return "Completeness could not separate these rows.";
+      const what = aboveZero ? "fields above zero" : "columns filled";
+      if (outcome === "narrowed") return "Kept the row with the " + most + " " + what + ".";
+      if (outcome === "tied") return "Every row has the same count — the one nearest the top of the file wins.";
+      return "Counting could not separate these rows.";
     }
   };
 }
@@ -1056,9 +1107,15 @@ function parseNumberWith(raw, opts){
 function makeNumberRule(cellAt, n, col, opts){
   const vec = new Float64Array(n);
   const miss = new Uint8Array(n);           // NaN would sort unpredictably
+  const strip = makeValueStrip(opts);
+  const zero = !!opts.zero;
   let unreadable = 0;
   for (let i = 0; i < n; i++){
-    const v = parseNumberWith(cellAt(i, col), opts);
+    const raw = cellAt(i, col);
+    // "Empty counts as 0" is about blank cells only. Text that simply cannot
+    // be read is still unreadable, and must not become a zero that wins "lowest".
+    if (zero && !String(raw).trim().length){ vec[i] = 0; continue; }
+    const v = parseNumberWith(strip(raw), opts);
     if (v === null){ miss[i] = 1; unreadable++; } else vec[i] = v;
   }
   return {
@@ -1220,30 +1277,109 @@ function makeDateRule(cellAt, n, col, opts){
   };
 }
 
-/* Turn the plain config objects the UI edits into live, scored rules. */
-function buildRules(cfgs, cellAt, n, wsBlank){
-  return cfgs.map(c => {
-    if (c.type === "date")     return makeDateRule(cellAt, n, c.col, c);
-    if (c.type === "number")   return makeNumberRule(cellAt, n, c.col, c);
-    if (c.type === "complete") return makeCompletenessRule(cellAt, n, c.cols || [],
-                                      { wsBlank: wsBlank, dir: c.dir });
-    return makeHasValueRule(cellAt, c.col, wsBlank);
-  });
+/* --- text: compare the value as written --- */
+
+function makeTextRule(cellAt, col, opts){
+  const strip = makeValueStrip(opts);
+  return {
+    type: "text", dir: opts.dir === -1 ? -1 : +1, col,
+    score(i){ const v = strip(cellAt(i, col)); return v.length ? v : null; },
+    reason(outcome){
+      const which = (opts.dir === -1) ? "first" : "last";
+      if (outcome === "narrowed") return "Kept the row whose value in that column sorts " + which + ".";
+      if (outcome === "tied") return "Those values are identical — the one nearest the top of the file wins.";
+      return "No row has a value in that column.";
+    }
+  };
 }
 
-/* One sentence describing what the chain will do, fallback included. */
+/* How a criterion reads past a prefix before comparing. "digits" jumps to the
+   first digit so the prefix never has to be named; it deliberately starts at
+   the digit, not at a preceding hyphen, so ACC-12-99 reads as 12 and not -12. */
+function makeValueStrip(opts){
+  const mode = opts.strip || "none";
+  if (mode === "digits") return v => { const m = String(v).match(/[0-9].*$/); return m ? m[0] : ""; };
+  if (mode === "prefix"){
+    const list = String(opts.pfx || "").split(",").map(x => x.trim()).filter(x => x.length);
+    const ci = !!opts.ci;
+    return v => {
+      const s = String(v);
+      for (const p of list){
+        const head = s.slice(0, p.length);
+        if (ci ? head.toLowerCase() === p.toLowerCase() : head === p)
+          return s.slice(p.length).replace(/^[ \t]+/, "");
+      }
+      return s;
+    };
+  }
+  return v => String(v);
+}
+
+/* A criterion is written the way the presets and the saved settings write it:
+
+     { type:"minmax", parse:"date"|"number"|"text", dir:"min"|"max", field:<col>,
+       fmt:"ISO"|"DMY"|"MDY"|"MON"|"SERIAL",        // date only
+       strip:"none"|"prefix"|"digits", pfx:"INV-",  // how to read past a prefix
+       decimal:"us"|"eu", accounting:false,         // number only
+       zero:false,                                  // blank counts as 0
+       on:true }                                    // false = keep it, do not run it
+
+     { type:"count", dir:"min"|"max", fields:[<col>…],
+       counts:"above-zero"|"filled", on:true }
+
+     { type:"hasvalue", field:<col>, on:true }
+
+   dir is a word here and a sign inside the engine; nothing else differs. */
+
+function ruleIsOn(c){ return c.on !== false; }
+function dirOf(c){ return c.dir === "min" || c.dir === -1 ? -1 : +1; }
+
+const DATE_FMT_ID = { ISO:"iso", DMY:"dmy", MDY:"mdy", MON:"mon", SERIAL:"serial" };
+const FMT_NAME = { iso:"ISO", dmy:"DMY", mdy:"MDY", mon:"MON", serial:"SERIAL" };
+
+/* Turn the config objects the UI edits into live, scored rules. Criteria that
+   are switched off are left out of the chain entirely. */
+function buildRules(cfgs, cellAt, n, wsBlank){
+  const out = [];
+  for (const c of cfgs){
+    if (!ruleIsOn(c)) continue;
+    const dir = dirOf(c);
+    if (c.type === "count"){
+      out.push(makeCountRule(cellAt, n, c.fields || [],
+        { wsBlank: wsBlank, dir: dir, counts: c.counts }));
+      continue;
+    }
+    if (c.type === "hasvalue"){ out.push(makeHasValueRule(cellAt, c.field, wsBlank)); continue; }
+    const o = Object.assign({}, c, { dir: dir });
+    if (c.parse === "date"){
+      o.format = DATE_FMT_ID[c.fmt] || c.fmt;
+      out.push(makeDateRule(cellAt, n, c.field, o));
+    } else if (c.parse === "text"){
+      out.push(makeTextRule(cellAt, c.field, o));
+    } else {
+      out.push(makeNumberRule(cellAt, n, c.field, o));
+    }
+  }
+  return out;
+}
+
+/* One line per criterion, in the vocabulary the presets are written in. */
 function describeChain(cfgs, nameOf){
-  const parts = cfgs.map(c => {
-    if (c.type === "date")
-      return "keep the " + (c.dir === -1 ? "earliest" : "latest") + " " + nameOf(c.col);
-    if (c.type === "number")
-      return "keep the " + (c.dir === -1 ? "lowest" : "highest") + " " + nameOf(c.col);
-    if (c.type === "complete")
-      return "keep the row filling the " + (c.dir === -1 ? "fewest" : "most") +
-             " of " + (c.cols || []).length + " column" + ((c.cols || []).length === 1 ? "" : "s");
-    return "keep a row that has a value in " + nameOf(c.col);
+  return cfgs.map(c => {
+    const off = ruleIsOn(c) ? "" : " (off)";
+    const min = dirOf(c) === -1;
+    if (c.type === "count"){
+      const what = (c.counts || "above-zero") === "above-zero" ? "fields above zero" : "columns filled";
+      return "keep the row with the " + (min ? "fewest " : "most ") + what +
+             " across " + (c.fields || []).length + " column" +
+             ((c.fields || []).length === 1 ? "" : "s") + off;
+    }
+    if (c.type === "hasvalue") return "keep a row that has a value in " + nameOf(c.field) + off;
+    const name = nameOf(c.field);
+    if (c.parse === "date")   return "keep the " + (min ? "oldest " : "newest ") + name + off;
+    if (c.parse === "text")   return "keep the " + (min ? "first " : "last ") + name + " alphabetically" + off;
+    return "keep the " + (min ? "lowest " : "highest ") + name + off;
   });
-  return parts;
 }
 
 /* Why this group resolved the way it did, in the deciding rule's own words. */
@@ -1360,7 +1496,7 @@ function runCollapse(){
   const wsBlank = $("#wsBlank").checked;
   const cellAt = (i, c) => ROWS[i][c];
   const rules = buildRules(RULECFG, cellAt, ROWS.length, wsBlank);
-  const tie = RULECFG.length && RULECFG[0].type !== "complete" ? RULECFG[0].col : null;
+  const tie = RULECFG.length && RULECFG[0].type !== "count" ? RULECFG[0].field : null;
 
   const out = collapseRows({
     n: ROWS.length,

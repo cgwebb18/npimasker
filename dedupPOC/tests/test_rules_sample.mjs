@@ -8,7 +8,7 @@
  *   Level 1  date, latest service_date
  *   Level 2  number, lowest invoice_no, "INV-" ignored
  *   Level 3  completeness across phone / email / address
- *   then     last row in file order
+ *   then     the row nearest the top of the file
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -36,9 +36,9 @@ function ingest(text){
 }
 
 const CHAIN = [
-  { type: "date",     col: SVC, dir: +1, format: "iso" },
-  { type: "number",   col: INV, dir: -1, prefixes: ["INV-"], decimal: "us", mode: "strict" },
-  { type: "complete", cols: [PHONE, EMAIL, ADDR], dir: +1 },
+  { type:"minmax", parse:"date",   dir:"max", field: SVC, fmt:"ISO" },
+  { type:"minmax", parse:"number", dir:"min", field: INV, strip:"prefix", pfx:"INV-", decimal:"us" },
+  { type:"count",  dir:"max", fields: [PHONE, EMAIL, ADDR], counts:"filled" },
 ];
 
 function run(){
