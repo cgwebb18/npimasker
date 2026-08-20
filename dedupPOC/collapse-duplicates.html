@@ -385,7 +385,24 @@ function sniffDelim(text){
 }
 function parseCSV(text){
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  const d = sniffDelim(text), out = [];
+
+  // Excel writes a leading "sep=," line when the saving machine's list
+  // separator differs from the one the extension implies. It is a declaration,
+  // not data: reading it as the header row makes the file two columns wide and
+  // silently drops every column after the second.
+  let declared = null;
+  const nl = text.search(/\r?\n/);
+  if (nl > 0 && text.slice(0, 4).toLowerCase() === "sep="){
+    const rest = text.slice(4, nl);
+    // One character declares the delimiter. A bare "sep=" declares nothing, but
+    // it is still not a header row, so drop it and fall back to sniffing.
+    if (rest.length <= 1){
+      if (rest.length === 1) declared = rest;
+      text = text.slice(nl + (text[nl] === "\r" ? 2 : 1));
+    }
+  }
+
+  const d = declared || sniffDelim(text), out = [];
   let row = [], f = "", q = false, i = 0;
   while (i < text.length){
     const c = text[i];
