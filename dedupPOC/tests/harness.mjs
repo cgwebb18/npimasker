@@ -98,3 +98,7 @@ export function loadRulesFromSource(html){
   return new Function('"use strict";' + html.slice(a + begin.length, b) +
                       "\nreturn {" + fields + "};")();
 }
+
+export function loadReport(){
+  return exportsOf(region("report"), ["collisionLines", "reportHeader"]);
+}

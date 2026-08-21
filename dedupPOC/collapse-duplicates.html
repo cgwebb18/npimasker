@@ -308,8 +308,10 @@ h3.sec{font-size:14.5px;margin:26px 0 10px}
       <div id="dlErr" class="err" hidden></div>
       <div class="btnrow" style="margin-top:16px">
         <button class="btn ghost" id="dlSummary">Run summary (.txt)</button>
+        <button class="btn ghost" id="dlInspect">Collision inspector (.txt)</button>
       </div>
       <div class="dlnote"><span class="safe">Safe to send on.</span> The summary is counts and column names only — no cell values from any row.</div>
+      <div class="dlnote">The collision inspector holds <b>real cell values</b> for every colliding group, not just the ones shown above — keep it on this machine.</div>
     </div>
   </section>
 
@@ -1425,6 +1427,85 @@ function fromPreset(preset, headers){
 
 /* ==== presets:end ==== */
 
+/* ==== report:begin ==== */
+
+/* The collision inspector as plain text.
+
+   Same information the panel shows, laid out the same way, for every colliding
+   group rather than the first thirty. Built a line at a time so a file with
+   hundreds of thousands of groups never has to exist as one string.
+
+   Unlike the run summary, this holds real cell values. It says so at the top. */
+
+const KEYSEP = "\u0000";   // the same separator the grouping keys use
+
+function padEndTo(s, n){ s = String(s); return s.length >= n ? s : s + " ".repeat(n - s.length); }
+
+function reportHeader(o){
+  const s = o.stats, L = [];
+  L.push("COLLISION INSPECTOR");
+  L.push("Generated " + o.when);
+  L.push("Source: " + o.name);
+  L.push("");
+  L.push("*** This file contains cell values from your data. Keep it on this machine. ***");
+  L.push("");
+  L.push("WHAT WAS MATCHED ON");
+  L.push("  " + o.keys.map(i => (o.headers[i] || ("column " + i))).join("  ·  "));
+  L.push("");
+  L.push("HOW THE SURVIVOR WAS CHOSEN");
+  if (o.chainAll.length) o.chainAll.forEach((line, i) => L.push("  " + (i + 1) + ". " + line));
+  else L.push("  (no criteria set)");
+  L.push("  " + (o.chainAll.length + 1) + ". otherwise keep the row nearest the top of the file");
+  L.push("");
+  L.push("RESULT");
+  L.push("  rows in ................. " + s.rowsIn);
+  L.push("  rows removed ............ " + s.removed);
+  L.push("  rows out ................ " + s.rowsOut);
+  L.push("  colliding groups ........ " + s.dupGroups);
+  L.push("");
+  L.push("Every colliding group follows. A row marked KEPT survived; the rest were");
+  L.push("removed. The numbered values are what each criterion compared.");
+  L.push("");
+  L.push("=".repeat(72));
+  return L;
+}
+
+/* One group, numbered as it appears in the file. */
+function collisionLines(g, number, ctx){
+  const L = [];
+  const parts = String(g.k).split(KEYSEP).slice(0, -1).map((v, i) => {
+    const h = ctx.headers[ctx.keys[i]] || ("column " + ctx.keys[i]);
+    return h + " = " + (v.length ? v : "(empty)");
+  });
+  L.push("");
+  L.push("GROUP " + number + (ctx.anyPfx ? "   (compared as)" : ""));
+  L.push("  " + parts.join("   ·   "));
+  L.push("");
+
+  g.idxs.forEach((i, j) => {
+    const kept = i === g.winner;
+    const seen = (g.shown && g.shown[j]) || [];
+    const cells = seen.map((v, ri) => {
+      const col = ctx.chain[ri] !== undefined ? ctx.chainCol[ri] : null;
+      const raw = (col === null || col === undefined) ? "" : String(ctx.cellAt(i, col));
+      if (v === null || v === undefined) return (ri + 1) + ". (no value)";
+      const differs = raw && raw.trim() !== String(v);
+      return (ri + 1) + ". " + v + (differs ? " (" + raw + ")" : "");
+    }).join("   ·   ");
+    L.push("  " + padEndTo(kept ? "KEPT" : "removed", 9) +
+           padEndTo("row " + (i + 2), 12) +
+           (g.pfx && g.pfx[j] ? padEndTo("[prefix cut]", 15) : padEndTo("", 15)) +
+           (cells || "(no criteria)"));
+  });
+
+  L.push("");
+  L.push("  -> " + g.reason);
+  L.push("-".repeat(72));
+  return L;
+}
+
+/* ==== report:end ==== */
+
 /* ==== rules:begin ==== */
 
 const NUL = "\u0000";   // key separator; never occurs in spreadsheet text
@@ -2266,6 +2347,48 @@ $("#dlClean").addEventListener("click", () => saveXlsx(RESULT.kept, SRCNAME + "_
 $("#dlRemoved").addEventListener("click", () => saveXlsx(RESULT.gone, SRCNAME + "_removed.xlsx", "removed"));
 $("#dlCleanCsv").addEventListener("click", () => saveCsv(RESULT.kept, SRCNAME + "_cleaned.csv"));
 $("#dlRemovedCsv").addEventListener("click", () => saveCsv(RESULT.gone, SRCNAME + "_removed.csv"));
+
+$("#dlInspect").addEventListener("click", () => {
+  $("#dlErr").hidden = true;
+  const btn = $("#dlInspect"), label = btn.textContent;
+  btn.textContent = "Working…"; btn.disabled = true;
+  setTimeout(() => {
+    try {
+      // The panel only keeps the first thirty groups, so the whole collapse is
+      // re-run with no sample cap to write the rest. Holding every group from
+      // the original run instead would cost memory on every run, including the
+      // ones where nobody asks for this file.
+      const cellAt = (i, c) => ROWS[i][c];
+      const out = collapseRows({
+        n: ROWS.length, cellAt, keys: RESULT.keys, norm: currentNorm(),
+        anyPfx: RESULT.anyPfx,
+        rules: buildRules(RESULT.rulecfg, cellAt, ROWS.length, RESULT.wsBlank),
+        wsBlank: RESULT.wsBlank, tie: RESULT.tie, sampleLimit: Infinity,
+      });
+      const ctx = { headers: HEADERS, keys: RESULT.keys, cellAt,
+                    chain: RESULT.chain, chainCol: RESULT.chainCol, anyPfx: RESULT.anyPfx };
+      // Assembled in parts: a file with hundreds of thousands of groups must
+      // never have to exist as a single string.
+      const parts = [];
+      let buf = reportHeader({ name: SRCNAME, when: new Date().toISOString(),
+                               stats: out.stats, chainAll: RESULT.chainAll,
+                               keys: RESULT.keys, headers: HEADERS }).join("\r\n");
+      out.samples.forEach((g, i) => {
+        buf += "\r\n" + collisionLines(g, i + 1, ctx).join("\r\n");
+        if (buf.length > 4e6){ parts.push(buf); buf = ""; }
+      });
+      if (!out.samples.length) buf += "\r\n\r\nNo collisions found. Every row is unique across the chosen match columns.";
+      parts.push(buf + "\r\n");
+      saveBlob(new Blob(parts, { type:"text/plain;charset=utf-8" }),
+               SRCNAME + "_collisions.txt");
+    } catch (e) {
+      dlFail("The collision inspector could not be written (" +
+             RESULT.stats.dupGroups.toLocaleString() + " groups). " +
+             "The removed-rows export holds the same rows.");
+    }
+    btn.textContent = label; btn.disabled = false;
+  }, 30);
+});
 
 $("#dlSummary").addEventListener("click", () => {
   const s = RESULT.stats, L = [];

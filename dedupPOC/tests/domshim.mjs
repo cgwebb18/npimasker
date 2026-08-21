@@ -113,7 +113,10 @@ export function bootPage(sharedStore){
   function Blob(parts){ this.parts = parts; saved.push(String(parts && parts[0])); }
   const fn = new Function("document", "window", "XLSX", "URL", "Blob", "setTimeout",
                           "localStorage", "__byId", js + epilogue);
-  const api = fn(document, win, XLSX, win.URL, Blob, () => 0, localStorage, el);
+  // Run deferred work immediately: the page wraps its heavy steps in
+  // setTimeout to let the browser repaint, and the tests need them to happen.
+  const runNow = (f) => { if (typeof f === "function") f(); return 0; };
+  const api = fn(document, win, XLSX, win.URL, Blob, runNow, localStorage, el);
   api.store = store;
   api.blobs = saved;
   api.setPrompt = v => { promptReply = v; };

@@ -287,3 +287,18 @@ test("a switched-off criterion does not shift the inspector's values", () => {
   const g = R.samples[0];
   assert.equal(g.shown[0].length, 1, "one value per active criterion, correctly aligned");
 });
+
+test("the collision inspector download covers every group, not just the shown ones", () => {
+  const p = boot();
+  p.keySet.add(0); p.keySet.add(1);
+  p.RULECFG = [{ type:"minmax", parse:"date", dir:"max", field:2, fmt:"ISO" }];
+  p.syncPick();
+  p.runCollapse();
+  p.el("dlInspect").fire("click");
+  const txt = p.blobs.filter(b => b.includes("COLLISION INSPECTOR")).pop();
+  assert.ok(txt, "a report was written");
+  assert.match(txt, /GROUP 1/);
+  assert.match(txt, /GROUP 2/, "both colliding groups, not a capped sample");
+  assert.match(txt, /\bKEPT\b/);
+  assert.match(txt, /cell values/i, "and it says what it contains");
+});

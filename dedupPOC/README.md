@@ -143,6 +143,7 @@ Anything the tool thinks is worth a second look appears in a highlighted box abo
 | **Cleaned rows** (`.xlsx` or `.csv`) | Your data with duplicates removed | Stays on your machine |
 | **Removed rows** (`.xlsx` or `.csv`) | Every row that was dropped, so you can check them | Stays on your machine |
 | **Run summary** (`.txt`) | Counts, column names and the rule that was applied — **no cell values from any row** | Safe to email out |
+| **Collision inspector** (`.txt`) | Every colliding group, which row was kept and why, and the values each criterion compared — **holds real cell values** | Stays on your machine |
 
 The summary is the one file that can be shared. Open it in Notepad first and confirm you're happy with what's in it.
 
